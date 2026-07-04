@@ -52,9 +52,6 @@ class Player:
         self.lock = threading.Lock()
         self.current = None      # currently-playing afplay Popen
         self.generation = 0      # bumped on stop() to invalidate in-flight work
-        self.duck_lock = threading.Lock()
-        self.duck_orig_volume = None  # system volume before we ducked it
-        self.duck_timer = None        # pending "restore after hold" timer
         threading.Thread(target=self._run, daemon=True).start()
 
     def submit(self, voice, speed, text, remember=False):
@@ -78,59 +75,10 @@ class Player:
                     break
             if self.current and self.current.poll() is None:
                 self.current.terminate()
-        self.duck_release(immediate=True)
 
     def _stale(self, gen):
         with self.lock:
             return gen != self.generation
-
-    def duck_start(self):
-        """Lower system output volume so other audio doesn't compete, and
-        return the afplay gain to use so our own voice stays close to its
-        original loudness."""
-        if not kc.duck_enabled():
-            return 1.0
-        with self.duck_lock:
-            if self.duck_timer:
-                self.duck_timer.cancel()
-                self.duck_timer = None
-            if self.duck_orig_volume is None:
-                vol = kc.get_system_volume()
-                if vol is None:
-                    return 1.0
-                self.duck_orig_volume = vol
-                kc.save_duck_state(vol)
-                kc.set_system_volume(kc.duck_level())
-            return kc.duck_boost(self.duck_orig_volume, kc.duck_level())
-
-    def duck_release(self, immediate=False):
-        """Restore system volume. By default waits a short hold so back-to-back
-        lines don't flicker the volume between them; immediate=True (barge-in,
-        shutdown) restores right away."""
-        if not kc.duck_enabled():
-            return
-
-        def restore():
-            with self.duck_lock:
-                if self.duck_orig_volume is not None:
-                    if kc.should_restore_volume(self.duck_orig_volume):
-                        kc.set_system_volume(self.duck_orig_volume)
-                    kc.clear_duck_state()
-                    self.duck_orig_volume = None
-                self.duck_timer = None
-
-        with self.duck_lock:
-            if self.duck_timer:
-                self.duck_timer.cancel()
-                self.duck_timer = None
-            if self.duck_orig_volume is None:
-                return
-            if not immediate:
-                self.duck_timer = threading.Timer(kc.duck_hold_seconds(), restore)
-                self.duck_timer.daemon = True
-                self.duck_timer.start()
-                return
-        restore()  # immediate: run outside the lock restore() itself acquires
 
     def _run(self):
         import numpy as np
@@ -168,10 +116,7 @@ class Player:
                         if delete_after:
                             os.unlink(out)
                         continue
-                    gain = self.duck_start()
-                    self.current = subprocess.Popen(
-                        ["afplay", "-v", f"{gain:.2f}", out]
-                    )
+                    self.current = subprocess.Popen(["afplay", out])
                 # Cache this line's audio so a later replay skips synthesis. Safe
                 # to copy while afplay reads `out` (read-only source).
                 if remember:
@@ -180,7 +125,6 @@ class Player:
                     except OSError:
                         pass
                 self.current.wait()
-                self.duck_release()
                 if delete_after:
                     try:
                         os.unlink(out)
@@ -204,16 +148,10 @@ def main():
     except OSError:
         return 0  # another instance already running
 
-    # A previous daemon killed mid-speech (SIGKILL skips atexit) would have left
-    # the system volume stuck at duck_level(); put it back before we start.
-    kc.recover_duck_state()
-
     from kokoro_onnx import Kokoro
 
     player = Player(Kokoro(MODEL, VOICES))
-    # stop() (not just duck_release) so a shutdown mid-line kills the boosted
-    # afplay before restoring volume, instead of leaving it playing at a
-    # boosted gain against the now-restored (louder) system volume.
+    # Kill any in-flight playback on shutdown so a line doesn't outlive the daemon.
     atexit.register(player.stop)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 

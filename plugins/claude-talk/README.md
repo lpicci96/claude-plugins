@@ -64,7 +64,6 @@ These use the **Option** modifier (`alt`) on purpose: `skhd` captures whatever c
 - **Engine:** [Kokoro-82M](https://github.com/hexgrad/kokoro) via [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx), run locally. 28 voices, US & UK, no API key.
 - **Low latency:** a small background daemon keeps the model loaded, so replies start in ~1–2 s. It idles out after 30 minutes to free memory.
 - **Barge-in:** a `UserPromptSubmit` hook stops playback the moment you send your next message.
-- **Ducking:** while Claude is speaking, other audio on the Mac is turned down (system output volume drops, Claude's own line is boosted with `afplay -v` to compensate) so it doesn't get talked over. Restores automatically ~1.2s after Claude stops speaking, or instantly on barge-in.
 - **Never breaks:** if the daemon or model is unavailable, it falls back to one-shot synthesis, then to macOS `say`.
 
 ## Configuration
@@ -77,15 +76,9 @@ KOKORO_SPEED=1.0        # 0.8–1.3
 CLAUDE_TALK_NAME=""     # optional; what Claude calls you
 ```
 
-Ducking is on by default and tunable via environment variables (not written by the installer, set them yourself if you want non-default behavior):
+Claude speaks at your current system volume and never changes it.
 
-```sh
-CLAUDE_TALK_DUCK=1          # set to 0 to disable ducking entirely
-CLAUDE_TALK_DUCK_LEVEL=30   # system volume (0-100) other audio is ducked to
-CLAUDE_TALK_DUCK_HOLD=1.2   # seconds to hold the duck after a line ends
-```
-
-Change them with `/talk-setup`, or re-run the picker: `install.sh --configure`.
+Change these with `/talk-setup`, or re-run the picker: `install.sh --configure`.
 
 ## Uninstall
 

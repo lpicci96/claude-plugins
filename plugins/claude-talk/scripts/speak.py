@@ -41,45 +41,24 @@ def main():
         out = f.name
     sf.write(out, audio, sr)
 
-    # Recover a volume left stuck low by a prior run that was hard-killed.
-    kc.recover_duck_state()
-
-    orig_volume = kc.get_system_volume() if kc.duck_enabled() else None
-    gain = 1.0
-    if orig_volume is not None:
-        kc.save_duck_state(orig_volume)
-        kc.set_system_volume(kc.duck_level())
-        gain = kc.duck_boost(orig_volume, kc.duck_level())
-
     proc = None
 
-    def _restore():
-        # Only restore if the user hasn't taken over the volume meanwhile;
-        # otherwise we'd clobber their choice.
-        if orig_volume is not None:
-            if kc.should_restore_volume(orig_volume):
-                kc.set_system_volume(orig_volume)
-            kc.clear_duck_state()
-
-    def _restore_and_die(*_):
-        # SIGTERM bypasses try/finally, so handle cleanup here — otherwise a
-        # hard kill mid-playback leaves the boosted afplay child running
-        # against the now-restored (louder) volume.
+    def _die(*_):
+        # SIGTERM bypasses try/finally, so kill the child and clean up here —
+        # otherwise a hard kill mid-playback leaves the afplay child running.
         if proc is not None and proc.poll() is None:
             proc.terminate()
-        _restore()
         try:
             os.unlink(out)
         except OSError:
             pass
         os._exit(1)
 
-    signal.signal(signal.SIGTERM, _restore_and_die)
+    signal.signal(signal.SIGTERM, _die)
     try:
-        proc = subprocess.Popen(["afplay", "-v", f"{gain:.2f}", out])
+        proc = subprocess.Popen(["afplay", out])
         proc.wait()
     finally:
-        _restore()
         os.unlink(out)
     return 0
 
