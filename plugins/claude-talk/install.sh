@@ -32,11 +32,13 @@ else
 fi
 
 step "Creating the Python environment"
+# Reuse an existing venv so re-running the installer is safe (uv errors on an
+# existing venv without --clear). The pip install step still refreshes deps.
 if command -v uv >/dev/null 2>&1; then
-  uv venv "$DATA/venv" --python 3.12
+  [ -d "$DATA/venv" ] || uv venv "$DATA/venv" --python 3.12
   uv pip install --python "$DATA/venv/bin/python" kokoro-onnx soundfile
 else
-  python3 -m venv "$DATA/venv"
+  [ -d "$DATA/venv" ] || python3 -m venv "$DATA/venv"
   "$DATA/venv/bin/python" -m pip install --quiet --upgrade pip
   "$DATA/venv/bin/python" -m pip install --quiet kokoro-onnx soundfile
 fi
