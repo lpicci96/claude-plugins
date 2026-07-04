@@ -36,6 +36,29 @@ The first time you run `/talk`, Claude Code asks permission to run the claude-ta
 
 You can also say "stop talking" to exit. Interrupt anytime — sending a new message stops whatever is playing.
 
+### Hotkeys (optional, opt-in): stop and repeat
+
+**These are entirely optional — the plugin does not install them, and everything above works without them.** If you want them, you set them up yourself once.
+
+Sending a message already stops playback, but you can't do that when Claude is idle at the end of a turn. For a true "shut up now" button — and a "say that again" button that costs **zero tokens** — bind two global hotkeys with [`skhd`](https://github.com/koekeishiya/skhd):
+
+```bash
+brew install koekeishiya/formulae/skhd
+mkdir -p ~/.config/skhd
+cat >> ~/.config/skhd/skhdrc <<'EOF'
+cmd - escape : ~/.claude/claude-talk/bin/stop.sh    # stop speaking now
+cmd - r      : ~/.claude/claude-talk/bin/repeat.sh  # replay the last line
+EOF
+skhd --start-service
+```
+
+Then grant **skhd** Accessibility permission (System Settings → Privacy & Security → Accessibility) and restart it with `skhd --restart-service`.
+
+- **Stop** kills playback and drops the queue instantly, from anywhere — even mid-turn or when Claude is idle.
+- **Repeat** replays the last full line Claude spoke, with no LLM turn. The daemon caches that line's rendered audio, so repeat replays the file directly (near-instant, no re-synthesis); if the cache isn't warm it falls back to re-synthesizing from the saved text. Interim narration is skipped, so repeat replays the real reply. The cache is shared across sessions, so repeat always replays the most recent thing said by any talk session.
+
+Pick any keys you like — note that `skhd` captures the combo globally, so avoid one you rely on elsewhere (`cmd - r` shadows browser/Finder reload while the service runs).
+
 ## How it works
 
 - **Engine:** [Kokoro-82M](https://github.com/hexgrad/kokoro) via [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx), run locally. 28 voices, US & UK, no API key.
