@@ -175,7 +175,10 @@ def main():
     from kokoro_onnx import Kokoro
 
     player = Player(Kokoro(MODEL, VOICES))
-    atexit.register(player.duck_release, immediate=True)
+    # stop() (not just duck_release) so a shutdown mid-line kills the boosted
+    # afplay before restoring volume, instead of leaving it playing at a
+    # boosted gain against the now-restored (louder) system volume.
+    atexit.register(player.stop)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     try:

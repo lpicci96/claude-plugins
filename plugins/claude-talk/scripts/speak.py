@@ -4,6 +4,7 @@ path fails. Reads text from argv or stdin, synthesizes, and plays via afplay.
 """
 
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,14 @@ def main():
     if orig_volume is not None:
         kc.set_system_volume(kc.duck_level())
         gain = kc.duck_boost(orig_volume, kc.duck_level())
+
+        def _restore_and_die(*_):
+            # SIGTERM bypasses try/finally, so restore here before exiting —
+            # otherwise a hard kill mid-playback leaves the Mac stuck ducked.
+            kc.set_system_volume(orig_volume)
+            os._exit(1)
+
+        signal.signal(signal.SIGTERM, _restore_and_die)
     try:
         subprocess.run(["afplay", "-v", f"{gain:.2f}", out], check=False)
     finally:
