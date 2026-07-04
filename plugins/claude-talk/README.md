@@ -46,8 +46,8 @@ Sending a message already stops playback, but you can't do that when Claude is i
 brew install koekeishiya/formulae/skhd
 mkdir -p ~/.config/skhd
 cat >> ~/.config/skhd/skhdrc <<'EOF'
-cmd - escape : ~/.claude/claude-talk/bin/stop.sh    # stop speaking now
-cmd - r      : ~/.claude/claude-talk/bin/repeat.sh  # replay the last line
+alt - escape : ~/.claude/claude-talk/bin/stop.sh    # stop speaking now
+alt - r      : ~/.claude/claude-talk/bin/repeat.sh  # replay the last line
 EOF
 skhd --start-service
 ```
@@ -57,7 +57,7 @@ Then grant **skhd** Accessibility permission (System Settings → Privacy & Secu
 - **Stop** kills playback and drops the queue instantly, from anywhere — even mid-turn or when Claude is idle.
 - **Repeat** replays the last full line Claude spoke, with no LLM turn. The daemon caches that line's rendered audio, so repeat replays the file directly (near-instant, no re-synthesis); if the cache isn't warm it falls back to re-synthesizing from the saved text. Interim narration is skipped, so repeat replays the real reply. The cache is shared across sessions, so repeat always replays the most recent thing said by any talk session.
 
-Pick any keys you like — note that `skhd` captures the combo globally, so avoid one you rely on elsewhere (`cmd - r` shadows browser/Finder reload while the service runs).
+These use the **Option** modifier (`alt`) on purpose: `skhd` captures whatever combo you bind _globally_, so a `cmd`-based one would shadow app shortcuts everywhere it runs (e.g. `cmd - r` would swallow browser/Finder reload). Pick any keys you like, but avoid ones you rely on elsewhere.
 
 ## How it works
 
