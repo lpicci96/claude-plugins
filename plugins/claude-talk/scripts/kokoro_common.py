@@ -46,6 +46,61 @@ def find_espeak():
             return
 
 
+def duck_enabled():
+    return os.environ.get("CLAUDE_TALK_DUCK", "1") not in ("0", "false", "False", "")
+
+
+def duck_level():
+    """Target system output volume (0-100) for OTHER audio while speaking."""
+    try:
+        return max(0, min(100, int(os.environ.get("CLAUDE_TALK_DUCK_LEVEL", "30"))))
+    except ValueError:
+        return 30
+
+
+def duck_hold_seconds():
+    """How long to keep the system ducked after a line finishes, so back-to-back
+    lines in a narration don't flicker the volume up and down between them."""
+    try:
+        return max(0.0, float(os.environ.get("CLAUDE_TALK_DUCK_HOLD", "1.2")))
+    except ValueError:
+        return 1.2
+
+
+def duck_boost(orig_volume, duck_to):
+    """afplay gain to keep our own voice close to its original loudness while
+    the system output (and everything else) is ducked to duck_to. Capped so we
+    don't push the signal into clipping."""
+    if orig_volume <= 0:
+        return 1.0
+    return min(1.8, orig_volume / max(duck_to, 1))
+
+
+def get_system_volume():
+    """Current macOS output volume (0-100), or None if it can't be read."""
+    try:
+        out = subprocess.run(
+            ["osascript", "-e", "output volume of (get volume settings)"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return int(out.stdout.strip())
+    except Exception:
+        return None
+
+
+def set_system_volume(level):
+    try:
+        subprocess.run(
+            ["osascript", "-e", f"set volume output volume {int(level)}"],
+            capture_output=True,
+            timeout=2,
+        )
+    except Exception:
+        pass
+
+
 def chunk(text):
     """Split text into <=MAX_CHARS pieces on sentence boundaries."""
     sentences = re.split(r"(?<=[.!?])\s+", text)

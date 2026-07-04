@@ -13,12 +13,15 @@ exits after IDLE_TIMEOUT with no requests to free RAM.
 Local only: Unix socket (a file), no network port, no outbound calls at runtime.
 """
 
+import atexit
 import fcntl
 import json
 import os
 import queue
+import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 
@@ -42,6 +45,9 @@ class Player:
         self.lock = threading.Lock()
         self.current = None      # currently-playing afplay Popen
         self.generation = 0      # bumped on stop() to invalidate in-flight work
+        self.duck_lock = threading.Lock()
+        self.duck_orig_volume = None  # system volume before we ducked it
+        self.duck_timer = None        # pending "restore after hold" timer
         threading.Thread(target=self._run, daemon=True).start()
 
     def submit(self, voice, speed, text):
@@ -59,10 +65,56 @@ class Player:
                     break
             if self.current and self.current.poll() is None:
                 self.current.terminate()
+        self.duck_release(immediate=True)
 
     def _stale(self, gen):
         with self.lock:
             return gen != self.generation
+
+    def duck_start(self):
+        """Lower system output volume so other audio doesn't compete, and
+        return the afplay gain to use so our own voice stays close to its
+        original loudness."""
+        if not kc.duck_enabled():
+            return 1.0
+        with self.duck_lock:
+            if self.duck_timer:
+                self.duck_timer.cancel()
+                self.duck_timer = None
+            if self.duck_orig_volume is None:
+                vol = kc.get_system_volume()
+                if vol is None:
+                    return 1.0
+                self.duck_orig_volume = vol
+                kc.set_system_volume(kc.duck_level())
+            return kc.duck_boost(self.duck_orig_volume, kc.duck_level())
+
+    def duck_release(self, immediate=False):
+        """Restore system volume. By default waits a short hold so back-to-back
+        lines don't flicker the volume between them; immediate=True (barge-in,
+        shutdown) restores right away."""
+        if not kc.duck_enabled():
+            return
+
+        def restore():
+            with self.duck_lock:
+                if self.duck_orig_volume is not None:
+                    kc.set_system_volume(self.duck_orig_volume)
+                    self.duck_orig_volume = None
+                self.duck_timer = None
+
+        with self.duck_lock:
+            if self.duck_timer:
+                self.duck_timer.cancel()
+                self.duck_timer = None
+            if self.duck_orig_volume is None:
+                return
+            if not immediate:
+                self.duck_timer = threading.Timer(kc.duck_hold_seconds(), restore)
+                self.duck_timer.daemon = True
+                self.duck_timer.start()
+                return
+        restore()  # immediate: run outside the lock restore() itself acquires
 
     def _run(self):
         import numpy as np
@@ -92,8 +144,12 @@ class Player:
                     if gen != self.generation:
                         os.unlink(out)
                         continue
-                    self.current = subprocess.Popen(["afplay", out])
+                    gain = self.duck_start()
+                    self.current = subprocess.Popen(
+                        ["afplay", "-v", f"{gain:.2f}", out]
+                    )
                 self.current.wait()
+                self.duck_release()
                 try:
                     os.unlink(out)
                 except OSError:
@@ -119,6 +175,11 @@ def main():
     from kokoro_onnx import Kokoro
 
     player = Player(Kokoro(MODEL, VOICES))
+    # stop() (not just duck_release) so a shutdown mid-line kills the boosted
+    # afplay before restoring volume, instead of leaving it playing at a
+    # boosted gain against the now-restored (louder) system volume.
+    atexit.register(player.stop)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     try:
         os.unlink(SOCK)

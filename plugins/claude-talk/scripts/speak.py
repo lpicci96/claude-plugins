@@ -4,6 +4,7 @@ path fails. Reads text from argv or stdin, synthesizes, and plays via afplay.
 """
 
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -39,9 +40,36 @@ def main():
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         out = f.name
     sf.write(out, audio, sr)
+
+    orig_volume = kc.get_system_volume() if kc.duck_enabled() else None
+    gain = 1.0
+    if orig_volume is not None:
+        kc.set_system_volume(kc.duck_level())
+        gain = kc.duck_boost(orig_volume, kc.duck_level())
+
+    proc = None
+
+    def _restore_and_die(*_):
+        # SIGTERM bypasses try/finally, so handle cleanup here — otherwise a
+        # hard kill mid-playback leaves the boosted afplay child running
+        # against the now-restored (louder) volume.
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        if orig_volume is not None:
+            kc.set_system_volume(orig_volume)
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+        os._exit(1)
+
+    signal.signal(signal.SIGTERM, _restore_and_die)
     try:
-        subprocess.run(["afplay", out], check=False)
+        proc = subprocess.Popen(["afplay", "-v", f"{gain:.2f}", out])
+        proc.wait()
     finally:
+        if orig_volume is not None:
+            kc.set_system_volume(orig_volume)
         os.unlink(out)
     return 0
 
