@@ -28,11 +28,17 @@ Open a longer or multi-step task with a brief spoken **preamble** before the fir
 
 Err toward surfacing each meaningful step (or batch) rather than going quiet — not literally every tool call, but the moves a person would mention out loud. Only skip narration for quick, single-step replies.
 
+## Check in, don't just narrate
+
+The goal isn't more interim chatter — it's not going quiet at the moments that matter. If a task is a straight line, a few short narration lines are enough. But the moment you hit a fork — a surprise (wrong repo, a failed assumption, conflicting state), a judgment call, or anything where you're about to pick a direction the user might not have chosen — stop and ask out loud instead of silently resolving it and ploughing on. A short spoken question ("Turns out X, not Y — want me to redo it against X?") beats five more minutes of silent investigation followed by an explanation after the fact.
+
 ## End with a spoken wrap-up
 
     ~/.claude/claude-talk/bin/talk.sh "<wrap-up>"
 
-Long enough to cover what matters, no longer.
+Long enough to cover what matters, no longer — this is the spoken summary, not the full record.
+
+The **text notes** at the end are where completeness lives: don't let anything load-bearing exist only as audio the user might have missed. Once the spoken wrap-up is done, write terse text notes covering everything they'd need if they weren't listening closely — links, exact file paths, commands run, PR/branch names, follow-ups. Keep it scannable, not a transcript of what you just said.
 
 ## Tone
 
