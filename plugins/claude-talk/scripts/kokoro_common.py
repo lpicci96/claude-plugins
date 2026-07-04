@@ -101,6 +101,51 @@ def set_system_volume(level):
         pass
 
 
+def should_restore_volume(orig_volume):
+    """Whether it's safe to restore the system volume to orig_volume.
+
+    We only lowered the volume to duck_level(); if it's no longer sitting at
+    that level, the user (or another app) changed it while we were speaking, so
+    restoring would clobber their choice. Leave it alone in that case. If the
+    volume can't be read, fall back to restoring (best effort)."""
+    cur = get_system_volume()
+    return cur is None or cur == duck_level()
+
+
+def _duck_state_path():
+    return os.path.join(data_dir(), "duck_state")
+
+
+def save_duck_state(orig_volume):
+    """Persist the pre-duck volume so a hard kill mid-speech (which skips the
+    normal restore) can be recovered on the next start — otherwise the system
+    is left stuck at duck_level()."""
+    try:
+        with open(_duck_state_path(), "w") as f:
+            f.write(str(int(orig_volume)))
+    except OSError:
+        pass
+
+
+def clear_duck_state():
+    try:
+        os.unlink(_duck_state_path())
+    except OSError:
+        pass
+
+
+def recover_duck_state():
+    """If a previous run was killed while ducked, restore the volume it saved
+    and clear the marker. No-op when there's nothing to recover."""
+    try:
+        with open(_duck_state_path()) as f:
+            orig = int(f.read().strip())
+    except (OSError, ValueError):
+        return
+    set_system_volume(orig)
+    clear_duck_state()
+
+
 def chunk(text):
     """Split text into <=MAX_CHARS pieces on sentence boundaries."""
     sentences = re.split(r"(?<=[.!?])\s+", text)

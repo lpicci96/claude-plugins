@@ -99,6 +99,7 @@ class Player:
                 if vol is None:
                     return 1.0
                 self.duck_orig_volume = vol
+                kc.save_duck_state(vol)
                 kc.set_system_volume(kc.duck_level())
             return kc.duck_boost(self.duck_orig_volume, kc.duck_level())
 
@@ -112,7 +113,9 @@ class Player:
         def restore():
             with self.duck_lock:
                 if self.duck_orig_volume is not None:
-                    kc.set_system_volume(self.duck_orig_volume)
+                    if kc.should_restore_volume(self.duck_orig_volume):
+                        kc.set_system_volume(self.duck_orig_volume)
+                    kc.clear_duck_state()
                     self.duck_orig_volume = None
                 self.duck_timer = None
 
@@ -200,6 +203,10 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return 0  # another instance already running
+
+    # A previous daemon killed mid-speech (SIGKILL skips atexit) would have left
+    # the system volume stuck at duck_level(); put it back before we start.
+    kc.recover_duck_state()
 
     from kokoro_onnx import Kokoro
 

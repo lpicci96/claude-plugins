@@ -41,13 +41,25 @@ def main():
         out = f.name
     sf.write(out, audio, sr)
 
+    # Recover a volume left stuck low by a prior run that was hard-killed.
+    kc.recover_duck_state()
+
     orig_volume = kc.get_system_volume() if kc.duck_enabled() else None
     gain = 1.0
     if orig_volume is not None:
+        kc.save_duck_state(orig_volume)
         kc.set_system_volume(kc.duck_level())
         gain = kc.duck_boost(orig_volume, kc.duck_level())
 
     proc = None
+
+    def _restore():
+        # Only restore if the user hasn't taken over the volume meanwhile;
+        # otherwise we'd clobber their choice.
+        if orig_volume is not None:
+            if kc.should_restore_volume(orig_volume):
+                kc.set_system_volume(orig_volume)
+            kc.clear_duck_state()
 
     def _restore_and_die(*_):
         # SIGTERM bypasses try/finally, so handle cleanup here — otherwise a
@@ -55,8 +67,7 @@ def main():
         # against the now-restored (louder) volume.
         if proc is not None and proc.poll() is None:
             proc.terminate()
-        if orig_volume is not None:
-            kc.set_system_volume(orig_volume)
+        _restore()
         try:
             os.unlink(out)
         except OSError:
@@ -68,8 +79,7 @@ def main():
         proc = subprocess.Popen(["afplay", "-v", f"{gain:.2f}", out])
         proc.wait()
     finally:
-        if orig_volume is not None:
-            kc.set_system_volume(orig_volume)
+        _restore()
         os.unlink(out)
     return 0
 
