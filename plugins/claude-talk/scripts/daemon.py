@@ -2,9 +2,14 @@
 """Persistent Kokoro TTS daemon for claude-talk.
 
 Loads the model once and stays resident on a Unix socket. Requests are JSON:
-  {"voice": "...", "speed": 1.0, "text": "..."}  -> enqueue speech
+  {"voice": "...", "speed": 1.0, "text": "...", "remember": true}
+                                                  -> enqueue speech; if remember,
+                                                     cache the rendered wav so it
+                                                     can be replayed instantly
   {"stop": true}                                  -> stop NOW: kill current
                                                      playback and drop the queue
+  {"replay": true}                                -> replay the cached wav with no
+                                                     re-synthesis (zero latency)
 
 Playback runs on a background thread, so a stop request can interrupt speech
 that is already playing or still queued (barge-in). Single instance (flock);
@@ -18,6 +23,7 @@ import fcntl
 import json
 import os
 import queue
+import shutil
 import signal
 import socket
 import subprocess
@@ -33,6 +39,7 @@ MODEL, VOICES = kc.model_paths()
 DATA = kc.data_dir()
 SOCK = os.path.join(DATA, "tts.sock")
 LOCK = os.path.join(DATA, "daemon.lock")
+LAST_WAV = os.path.join(DATA, "last.wav")  # cached audio of the last "proper" line
 IDLE_TIMEOUT = 1800  # exit after 30 min with no requests
 
 
@@ -50,10 +57,16 @@ class Player:
         self.duck_timer = None        # pending "restore after hold" timer
         threading.Thread(target=self._run, daemon=True).start()
 
-    def submit(self, voice, speed, text):
+    def submit(self, voice, speed, text, remember=False):
         with self.lock:
             gen = self.generation
-        self.q.put((gen, voice, speed, text))
+        self.q.put((gen, "speak", voice, speed, text, remember))
+
+    def replay(self):
+        """Queue a replay of the cached wav (no synthesis)."""
+        with self.lock:
+            gen = self.generation
+        self.q.put((gen, "replay", None, None, None, False))
 
     def stop(self):
         with self.lock:
@@ -121,39 +134,55 @@ class Player:
         import soundfile as sf
 
         while True:
-            gen, voice, speed, text = self.q.get()
+            gen, kind, voice, speed, text, remember = self.q.get()
             if self._stale(gen):
                 continue
             try:
-                parts, sr = [], 24000
-                for piece in kc.chunk(text):
-                    if self._stale(gen):
-                        break
-                    samples, sr = self.kokoro.create(
-                        piece, voice=voice, speed=speed, lang="en-us"
-                    )
-                    parts.append(samples)
-                    parts.append(np.zeros(int(sr * 0.12), dtype=samples.dtype))
-                if self._stale(gen) or not parts:
-                    continue
-                audio = np.concatenate(parts)
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                    out = f.name
-                sf.write(out, audio, sr)
+                if kind == "replay":
+                    # No synthesis: just play the cached wav, and don't delete it.
+                    if not os.path.exists(LAST_WAV):
+                        continue
+                    out, delete_after = LAST_WAV, False
+                else:
+                    parts, sr = [], 24000
+                    for piece in kc.chunk(text):
+                        if self._stale(gen):
+                            break
+                        samples, sr = self.kokoro.create(
+                            piece, voice=voice, speed=speed, lang="en-us"
+                        )
+                        parts.append(samples)
+                        parts.append(np.zeros(int(sr * 0.12), dtype=samples.dtype))
+                    if self._stale(gen) or not parts:
+                        continue
+                    audio = np.concatenate(parts)
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                        out = f.name
+                    sf.write(out, audio, sr)
+                    delete_after = True
                 with self.lock:
                     if gen != self.generation:
-                        os.unlink(out)
+                        if delete_after:
+                            os.unlink(out)
                         continue
                     gain = self.duck_start()
                     self.current = subprocess.Popen(
                         ["afplay", "-v", f"{gain:.2f}", out]
                     )
+                # Cache this line's audio so a later replay skips synthesis. Safe
+                # to copy while afplay reads `out` (read-only source).
+                if remember:
+                    try:
+                        shutil.copyfile(out, LAST_WAV)
+                    except OSError:
+                        pass
                 self.current.wait()
                 self.duck_release()
-                try:
-                    os.unlink(out)
-                except OSError:
-                    pass
+                if delete_after:
+                    try:
+                        os.unlink(out)
+                    except OSError:
+                        pass
             except Exception:
                 pass
 
@@ -219,6 +248,15 @@ def main():
                 _reply(conn, b"OK\n")
                 continue
 
+            if req.get("replay"):
+                # NONE lets the client fall back to re-synthesis from saved text.
+                if os.path.exists(LAST_WAV):
+                    player.replay()
+                    _reply(conn, b"OK\n")
+                else:
+                    _reply(conn, b"NONE\n")
+                continue
+
             text = (req.get("text") or "").strip()
             voice = req.get("voice") or "af_heart"
             try:
@@ -230,7 +268,7 @@ def main():
                 _reply(conn, b"EMPTY\n")
                 continue
 
-            player.submit(voice, speed, text)
+            player.submit(voice, speed, text, remember=bool(req.get("remember")))
             _reply(conn, b"OK\n")
 
     try:

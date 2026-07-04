@@ -7,7 +7,27 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 
 TEXT="$*"
 [ -z "$TEXT" ] && TEXT="$(cat)"
+
+# Robustness: the interim flag belongs *before* the command as an env var
+# (`KOKORO_NOWAIT=1 talk.sh "…"`). If it lands as a trailing argument instead,
+# honor it as the flag rather than reading "KOKORO_NOWAIT=1" aloud.
+tail_tok="${TEXT##* }"
+case "$tail_tok" in
+  KOKORO_NOWAIT=*)
+    export KOKORO_NOWAIT="${tail_tok#KOKORO_NOWAIT=}"
+    case "$TEXT" in
+      *" "*) TEXT="${TEXT% *}" ;;  # drop the trailing token
+      *)     TEXT="" ;;            # it was the only token
+    esac
+    ;;
+esac
+
 [ -z "$TEXT" ] && exit 0
+
+# Remember the last "proper" line so a repeat hotkey can replay it with zero LLM
+# tokens (see repeat.sh). Skip fire-and-forget interim lines (KOKORO_NOWAIT) so
+# repeat replays the real reply, not a throwaway "validating…" chirp.
+[ -z "$KOKORO_NOWAIT" ] && printf '%s' "$TEXT" > "$CLAUDE_TALK_HOME/last.txt" 2>/dev/null
 
 # Drop a per-session "just spoke" marker so a user who has a completion chime
 # can silence it while claude-talk is speaking (opt-in; see README). Harmless

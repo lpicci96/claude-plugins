@@ -2,7 +2,8 @@
 """Client for the claude-talk daemon.
 
 Sends text (argv or stdin) to the daemon over its Unix socket, starting the
-daemon if it isn't running. With --stop, sends a stop (barge-in) instead. Exits
+daemon if it isn't running. With --stop, sends a stop (barge-in) instead; with
+--replay, asks the daemon to replay its cached wav (no re-synthesis). Exits
 non-zero on failure so the shell wrapper can fall back to the one-shot path.
 """
 
@@ -52,9 +53,32 @@ def send_stop():
     return 0
 
 
+def send_replay():
+    """Ask the daemon to replay its cached wav. Returns 0 if it will, or 2 so
+    the caller can fall back to re-synthesis (no daemon / nothing cached)."""
+    try:
+        s = connect()
+    except OSError:
+        return 2  # no daemon -> fall back
+    try:
+        s.sendall(json.dumps({"replay": True}).encode("utf-8"))
+        s.shutdown(socket.SHUT_WR)
+        ack = s.recv(16)
+        return 0 if ack.strip() == b"OK" else 2
+    except OSError:
+        return 2
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--stop":
         return send_stop()
+    if len(sys.argv) > 1 and sys.argv[1] == "--replay":
+        return send_replay()
 
     text = " ".join(sys.argv[1:]).strip() or sys.stdin.read().strip()
     if not text:
@@ -64,6 +88,9 @@ def main():
             "voice": os.environ.get("KOKORO_VOICE", "af_heart"),
             "speed": os.environ.get("KOKORO_SPEED", "1.0"),
             "text": text,
+            # Cache this line's audio for instant replay, unless it's a
+            # fire-and-forget interim line (KOKORO_NOWAIT).
+            "remember": not os.environ.get("KOKORO_NOWAIT"),
         }
     ).encode("utf-8")
 
