@@ -39,9 +39,17 @@ def main():
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         out = f.name
     sf.write(out, audio, sr)
+
+    orig_volume = kc.get_system_volume() if kc.duck_enabled() else None
+    gain = 1.0
+    if orig_volume is not None:
+        kc.set_system_volume(kc.duck_level())
+        gain = kc.duck_boost(orig_volume, kc.duck_level())
     try:
-        subprocess.run(["afplay", out], check=False)
+        subprocess.run(["afplay", "-v", f"{gain:.2f}", out], check=False)
     finally:
+        if orig_volume is not None:
+            kc.set_system_volume(orig_volume)
         os.unlink(out)
     return 0
 
