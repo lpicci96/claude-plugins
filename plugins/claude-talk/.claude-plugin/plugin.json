@@ -1,7 +1,7 @@
 {
   "name": "claude-talk",
   "description": "Voice-first conversation mode for Claude Code — talk with Claude out loud using a local, natural Kokoro voice. No API key, fully offline.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "author": {
     "name": "Luca Picci",
     "url": "https://github.com/lpicci96"
@@ -16,6 +16,5 @@
     "kokoro",
     "conversation",
     "accessibility"
-  ],
-  "hooks": "./hooks/hooks.json"
+  ]
 }
