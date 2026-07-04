@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "d=\"$HOME/.claude/claude-talk/bin\"; [ -d \"$d\" ] && { cp -f \"${CLAUDE_PLUGIN_ROOT}\"/scripts/*.py \"${CLAUDE_PLUGIN_ROOT}\"/scripts/*.sh \"$d\"/ 2>/dev/null; chmod +x \"$d\"/*.sh 2>/dev/null; }; true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/stop.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

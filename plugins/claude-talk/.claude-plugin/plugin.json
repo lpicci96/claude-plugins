@@ -1,0 +1,21 @@
+{
+  "name": "claude-talk",
+  "description": "Voice-first conversation mode for Claude Code — talk with Claude out loud using a local, natural Kokoro voice. No API key, fully offline.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Luca Picci",
+    "url": "https://github.com/lpicci96"
+  },
+  "homepage": "https://github.com/lpicci96/claude-plugins/tree/main/plugins/claude-talk",
+  "repository": "https://github.com/lpicci96/claude-plugins",
+  "license": "MIT",
+  "keywords": [
+    "tts",
+    "voice",
+    "speech",
+    "kokoro",
+    "conversation",
+    "accessibility"
+  ],
+  "hooks": "./hooks/hooks.json"
+}

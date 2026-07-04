@@ -7,10 +7,7 @@
   "plugins": [
     {
       "name": "claude-talk",
-      "source": {
-        "source": "github",
-        "repo": "lpicci96/claude-talk"
-      },
+      "source": "./plugins/claude-talk",
       "description": "Voice-first conversation mode for Claude Code — talk with Claude out loud using a local Kokoro voice (macOS)."
     }
   ]

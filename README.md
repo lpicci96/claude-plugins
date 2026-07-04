@@ -11,7 +11,7 @@ A personal [marketplace](https://code.claude.com/docs/en/plugin-marketplaces) of
 
 ## Plugins
 
-- **[claude-talk](https://github.com/lpicci96/claude-talk)** — voice-first conversation mode: talk with Claude out loud using a local Kokoro voice. No API key, fully offline. macOS.
+- **[claude-talk](./plugins/claude-talk)** — voice-first conversation mode: talk with Claude out loud using a local Kokoro voice. No API key, fully offline. macOS.
 
   ```bash
   /plugin install claude-talk@lpicci96
