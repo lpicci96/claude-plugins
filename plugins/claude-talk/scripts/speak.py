@@ -47,15 +47,26 @@ def main():
         kc.set_system_volume(kc.duck_level())
         gain = kc.duck_boost(orig_volume, kc.duck_level())
 
-        def _restore_and_die(*_):
-            # SIGTERM bypasses try/finally, so restore here before exiting —
-            # otherwise a hard kill mid-playback leaves the Mac stuck ducked.
-            kc.set_system_volume(orig_volume)
-            os._exit(1)
+    proc = None
 
-        signal.signal(signal.SIGTERM, _restore_and_die)
+    def _restore_and_die(*_):
+        # SIGTERM bypasses try/finally, so handle cleanup here — otherwise a
+        # hard kill mid-playback leaves the boosted afplay child running
+        # against the now-restored (louder) volume.
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        if orig_volume is not None:
+            kc.set_system_volume(orig_volume)
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+        os._exit(1)
+
+    signal.signal(signal.SIGTERM, _restore_and_die)
     try:
-        subprocess.run(["afplay", "-v", f"{gain:.2f}", out], check=False)
+        proc = subprocess.Popen(["afplay", "-v", f"{gain:.2f}", out])
+        proc.wait()
     finally:
         if orig_volume is not None:
             kc.set_system_volume(orig_volume)
