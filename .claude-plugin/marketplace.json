@@ -1,0 +1,17 @@
+{
+  "name": "lpicci96",
+  "owner": {
+    "name": "Luca Picci",
+    "url": "https://github.com/lpicci96"
+  },
+  "plugins": [
+    {
+      "name": "claude-talk",
+      "source": {
+        "source": "github",
+        "repo": "lpicci96/claude-talk"
+      },
+      "description": "Voice-first conversation mode for Claude Code — talk with Claude out loud using a local Kokoro voice (macOS)."
+    }
+  ]
+}
