@@ -30,8 +30,9 @@ esac
 [ -z "$KOKORO_NOWAIT" ] && printf '%s' "$TEXT" > "$CLAUDE_TALK_HOME/last.txt" 2>/dev/null
 
 # Drop a per-session "just spoke" marker so a user who has a completion chime
-# can silence it while claude-talk is speaking (opt-in; see README). Harmless
-# for everyone else. Also tidy markers older than a day.
+# can silence it while claude-talk is speaking (opt-in; see the README
+# "Completion chime" section). Harmless for everyone else. Also tidy markers
+# older than a day.
 touch "$CLAUDE_TALK_HOME/spoke-${CLAUDE_CODE_SESSION_ID:-nosession}" 2>/dev/null
 find "$CLAUDE_TALK_HOME" -maxdepth 1 -name 'spoke-*' -mtime +1 -delete 2>/dev/null
 

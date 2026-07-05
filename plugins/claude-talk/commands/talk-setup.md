@@ -12,13 +12,13 @@ Help the user reconfigure their claude-talk voice. Drive it conversationally:
 
    Good options: `af_heart`, `af_bella`, `af_nicole`, `af_sarah` (US female); `am_michael`, `am_adam` (US male); `bf_emma` (UK female); `bm_george` (UK male).
 
-3. Ask which they want, their preferred speed (0.8–1.3), an optional name, how loud Claude should be (`CLAUDE_TALK_VOLUME`, 0–100), and whether to dim other audio while speaking (`CLAUDE_TALK_DUCK`, on/off).
-4. Write `~/.claude/claude-talk/config.env` with exactly these lines (preserve any existing values you're not changing):
+3. Ask which they want, their preferred speed (0.8–1.3), an optional name, how loud Claude should be (`CLAUDE_TALK_VOLUME`, 100 = normal, up to 190 louder), and whether to dim other audio while speaking (`CLAUDE_TALK_DUCK`, on/off).
+4. Write `~/.claude/claude-talk/config.env` with these lines, preserving any existing values you're not changing and keeping any other keys (e.g. the advanced `CLAUDE_TALK_DUCK_RATIO` / `CLAUDE_TALK_DUCK_HOLD`) untouched:
 
        KOKORO_VOICE=<voice>
        KOKORO_SPEED=<speed>
        CLAUDE_TALK_NAME="<name>"
-       CLAUDE_TALK_VOLUME=<0-100>
+       CLAUDE_TALK_VOLUME=<0-190>
        CLAUDE_TALK_DUCK=<on|off>
 
 5. Confirm. All of these are sent per-request, so the change takes effect on the very next spoken line — no restart needed. (`CLAUDE_TALK_VOLUME` is Claude's own loudness, independent of system volume; `CLAUDE_TALK_DUCK` dims other audio while Claude speaks and restores it after.)

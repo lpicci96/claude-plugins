@@ -10,6 +10,9 @@ Loads the model once and stays resident on a Unix socket. Requests are JSON:
                                                      playback and drop the queue
   {"replay": true}                                -> replay the cached wav with no
                                                      re-synthesis (zero latency)
+Speak and replay requests also carry the volume/duck settings ("volume", "duck",
+"duck_ratio", "duck_hold") so config changes apply on the next line without a
+daemon restart.
 
 Playback runs on a background thread, so a stop request can interrupt speech
 that is already playing or still queued (barge-in). Single instance (flock);
