@@ -268,7 +268,7 @@ def _settings(req):
         "",
     )
     return {
-        "volume": min(100, max(0, num("volume", 100, lambda x: int(float(x))))),
+        "volume": min(190, max(0, num("volume", 100, lambda x: int(float(x))))),
         "duck": duck,
         "ratio": min(0.95, max(0.1, num("duck_ratio", 0.5, float))),
         "hold": max(0.0, num("duck_hold", 1.2, float)),
