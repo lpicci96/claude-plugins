@@ -74,6 +74,8 @@ class Ducker:
         afplay gain to use for it."""
         base = kc.gain_from_volume(s["volume"])
         flat = min(base, kc.clip_ceiling(audio))  # un-ducked gain, never clipping
+        # Never duck harder than keeps Claude at its set volume (see kc docs).
+        ratio = kc.effective_ratio(base, s["ratio"])
         with self.lock:
             self._cancel_timer()
             if not s["duck"]:
@@ -86,17 +88,17 @@ class Ducker:
                 self._drop_state()
                 return flat
             if self.ducked and cur == self.g_duck:
-                return kc.duck_boosted_gain(base, s["ratio"], audio)  # continue
+                return kc.duck_boosted_gain(base, ratio, audio)  # continue
             # Either starting a burst, or the user moved the volume mid-burst:
             # (re-)duck from the current level, re-centering the mix on it.
-            g_duck = round(cur * s["ratio"])
+            g_duck = round(cur * ratio)
             if g_duck >= cur:
                 self._drop_state()  # ratio too gentle to change anything
                 return flat
             kc.set_system_volume(g_duck)
             self.g_orig, self.g_duck, self.ducked = cur, g_duck, True
             kc.save_duck_marker(cur, g_duck)
-            return kc.duck_boosted_gain(base, s["ratio"], audio)
+            return kc.duck_boosted_gain(base, ratio, audio)
 
     def end(self, s):
         """A line finished: arm the restore so the volume comes back once the

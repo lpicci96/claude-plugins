@@ -104,6 +104,22 @@ def duck_boosted_gain(base, ratio, audio=None):
     return min(base / ratio, clip_ceiling(audio))
 
 
+def effective_ratio(base, requested):
+    """The duck fraction actually applied to other audio.
+
+    Ducking lowers the global volume and boosts Claude's gain to compensate, but
+    that boost is capped at the clip ceiling. Below `base / DUCK_GAIN_CAP` the
+    boost can't keep up, so Claude drops below its set volume — and since the
+    Claude-vs-other gap is itself capped by that ceiling, ducking harder widens
+    nothing, it only pulls Claude down. So we floor the ratio at that "sweet
+    spot": the most aggressive duck that still keeps Claude at its volume, which
+    already gives the maximum gap. A larger (gentler) requested ratio is honored.
+    """
+    if base <= 0:
+        return min(0.95, max(0.1, requested))
+    return min(0.95, max(base / DUCK_GAIN_CAP, requested, 0.1))
+
+
 def get_volume_state():
     """Current macOS output as (volume 0-100, muted bool); (None, False) if it
     can't be read."""

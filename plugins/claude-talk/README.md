@@ -107,12 +107,22 @@ CLAUDE_TALK_DUCK_RATIO=0.5   # duck other audio to this fraction of current volu
 CLAUDE_TALK_DUCK_HOLD=1.2    # seconds to stay ducked after a line before restoring
 ```
 
-A **lower** `CLAUDE_TALK_DUCK_RATIO` ducks other audio harder (e.g. `0.4` drops
-it to 40%). Note the trade-off: the Kokoro voice has limited headroom, so the
-harder you duck, the more Claude's own level drops with it — against very loud
-music Claude can't fully out-shout it. Ducking lowers the global volume, so it
-dims **all** other audio — browser tabs, YouTube, games — not just scriptable
-players. To turn ducking off entirely, set `CLAUDE_TALK_DUCK=off`.
+**The duck auto-limits so Claude never drops below `CLAUDE_TALK_VOLUME`.** The
+Kokoro voice can only be boosted so far before it clips, which caps both how loud
+Claude can be _and_ how far the gap to other audio can open. Those two limits
+meet at a **sweet spot** — roughly `CLAUDE_TALK_VOLUME / 190` — where the gap is
+already as wide as it physically gets while Claude stays right at its set volume.
+Asking for a **lower** ratio than that wouldn't widen the gap (it's capped); it
+would only pull Claude down, so it's floored at the sweet spot. So in practice
+you just set `CLAUDE_TALK_VOLUME`; the duck picks the most aggressive setting that
+keeps Claude there. Raise `CLAUDE_TALK_DUCK_RATIO` above the sweet spot if you
+want _gentler_ ducking (other audio stays more present).
+
+To duck other audio _lower_ than the sweet spot allows, you have to accept Claude
+sitting below its set volume — lower `CLAUDE_TALK_VOLUME`. Ducking lowers the
+global volume, so it dims **all** other audio — browser tabs, YouTube, games —
+not just scriptable players. To turn ducking off entirely, set
+`CLAUDE_TALK_DUCK=off`.
 
 ## Uninstall
 

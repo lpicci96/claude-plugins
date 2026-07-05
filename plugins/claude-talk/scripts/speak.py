@@ -50,9 +50,10 @@ def main():
     gain = min(base, kc.clip_ceiling(audio))  # un-ducked gain, never clipping
     duck_state = None
     if s["duck"]:
-        duck_state = kc.duck_start(s["ratio"])
+        ratio = kc.effective_ratio(base, s["ratio"])  # never drop Claude below its volume
+        duck_state = kc.duck_start(ratio)
         if duck_state:
-            gain = kc.duck_boosted_gain(base, s["ratio"], audio)
+            gain = kc.duck_boosted_gain(base, ratio, audio)
 
     proc = None
 
