@@ -28,7 +28,7 @@ CURATED = [
 ]
 
 
-def play(kokoro, voice, speed, text):
+def play(kokoro, voice, speed, text, gain=1.0):
     import numpy as np
     import soundfile as sf
 
@@ -41,7 +41,7 @@ def play(kokoro, voice, speed, text):
         out = f.name
     sf.write(out, audio, sr)
     try:
-        subprocess.run(["afplay", out], check=False)
+        subprocess.run(["afplay", "-v", f"{gain:.3f}", out], check=False)
     finally:
         os.unlink(out)
 
@@ -85,6 +85,24 @@ def main():
         except ValueError:
             print("  enter a number like 1.1")
 
+    volume = 100
+    vol_in = input(f"\nHow loud should I be? 0-100 [{volume}] (Enter to keep) > ").strip()
+    if vol_in:
+        try:
+            volume = min(100, max(0, int(float(vol_in))))
+        except ValueError:
+            print("  keeping 100")
+    try:
+        print("  previewing volume...")
+        play(kokoro, voice, speed, "This is my speaking volume.", volume / 100.0)
+    except Exception:
+        pass
+
+    duck_in = input(
+        "\nDim other audio (music, video) while I speak? [Y/n] > "
+    ).strip().lower()
+    duck = "off" if duck_in in ("n", "no", "off", "0", "false") else "on"
+
     name = input("\nWhat should I call you? (optional, Enter to skip) > ").strip()
 
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
@@ -92,12 +110,16 @@ def main():
         f.write(f"KOKORO_VOICE={voice}\n")
         f.write(f"KOKORO_SPEED={speed}\n")
         f.write(f'CLAUDE_TALK_NAME="{name}"\n')
+        f.write(f"CLAUDE_TALK_VOLUME={volume}\n")
+        f.write(f"CLAUDE_TALK_DUCK={duck}\n")
 
     print(f"\nSaved {CONFIG}")
-    print(f"  voice = {voice}")
-    print(f"  speed = {speed}")
+    print(f"  voice  = {voice}")
+    print(f"  speed  = {speed}")
+    print(f"  volume = {volume}")
+    print(f"  duck   = {duck}")
     if name:
-        print(f"  name  = {name}")
+        print(f"  name   = {name}")
     return 0
 
 

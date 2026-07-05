@@ -27,6 +27,9 @@ def main():
     import soundfile as sf
     from kokoro_onnx import Kokoro
 
+    # A prior run killed mid-duck may have left the volume low — put it back.
+    kc.recover_duck()
+
     kokoro = Kokoro(MODEL, VOICES)
     parts, sr = [], 24000
     for piece in kc.chunk(text):
@@ -41,13 +44,25 @@ def main():
         out = f.name
     sf.write(out, audio, sr)
 
+    # Claude's own volume, plus a one-shot duck of other audio while we speak.
+    s = kc.env_settings()
+    base = kc.gain_from_volume(s["volume"])
+    gain = min(base, kc.clip_ceiling(audio))  # un-ducked gain, never clipping
+    duck_state = None
+    if s["duck"]:
+        ratio = kc.effective_ratio(base, s["ratio"])  # never drop Claude below its volume
+        duck_state = kc.duck_start(ratio)
+        if duck_state:
+            gain = kc.duck_boosted_gain(base, ratio, audio)
+
     proc = None
 
     def _die(*_):
-        # SIGTERM bypasses try/finally, so kill the child and clean up here —
-        # otherwise a hard kill mid-playback leaves the afplay child running.
+        # SIGTERM bypasses try/finally, so kill the child, un-duck, and clean up
+        # here — otherwise a hard kill leaves afplay running and the volume low.
         if proc is not None and proc.poll() is None:
             proc.terminate()
+        kc.duck_stop(duck_state)
         try:
             os.unlink(out)
         except OSError:
@@ -56,9 +71,10 @@ def main():
 
     signal.signal(signal.SIGTERM, _die)
     try:
-        proc = subprocess.Popen(["afplay", out])
+        proc = subprocess.Popen(["afplay", "-v", f"{gain:.3f}", out])
         proc.wait()
     finally:
+        kc.duck_stop(duck_state)
         os.unlink(out)
     return 0
 
