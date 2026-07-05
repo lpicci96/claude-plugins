@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Interactive configuration for claude-talk: pick a voice, set speed and an
-optional name, and write config.env. Run by install.sh (needs a real terminal).
-Re-run any time with:  install.sh --configure
+"""Interactive configuration for claude-talk: pick a voice, set speed, volume,
+ducking, and an optional name, and write config.env. Starts from the current
+config so re-running only changes what you answer. Run by install.sh (needs a
+real terminal). Re-run any time with:  install.sh --configure
 """
 
 import os
@@ -37,6 +38,7 @@ def play(kokoro, voice, speed, text, gain=1.0):
         samples, sr = kokoro.create(piece, voice=voice, speed=speed, lang="en-us")
         parts.append(samples)
     audio = np.concatenate(parts)
+    gain = min(gain, kc.clip_ceiling(audio))  # boosted previews never clip
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         out = f.name
     sf.write(out, audio, sr)
@@ -46,14 +48,49 @@ def play(kokoro, voice, speed, text, gain=1.0):
         os.unlink(out)
 
 
+KNOWN_KEYS = (
+    "KOKORO_VOICE",
+    "KOKORO_SPEED",
+    "CLAUDE_TALK_NAME",
+    "CLAUDE_TALK_VOLUME",
+    "CLAUDE_TALK_DUCK",
+)
+
+
+def read_config():
+    """Existing config.env as (values dict, extra raw lines). The values seed
+    the prompts' defaults; the extra lines (e.g. advanced duck tuning) are
+    rewritten verbatim so reconfiguring never drops them."""
+    cfg, extras = {}, []
+    try:
+        with open(CONFIG) as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                if k in KNOWN_KEYS:
+                    cfg[k] = v.strip().strip('"')
+                else:
+                    extras.append(line)
+    except OSError:
+        pass
+    return cfg, extras
+
+
 def main():
     from kokoro_onnx import Kokoro
 
     print("\nLoading the voice model (a few seconds)...")
     kokoro = Kokoro(MODEL, VOICES)
 
-    voice = "af_heart"
-    speed = 1.0
+    cfg, extras = read_config()
+    voice = cfg.get("KOKORO_VOICE") or "af_heart"
+    try:
+        speed = float(cfg.get("KOKORO_SPEED") or 1.0)
+    except ValueError:
+        speed = 1.0
 
     print("\n=== Pick a voice ===")
     for i, (v, d) in enumerate(CURATED, 1):
@@ -85,25 +122,41 @@ def main():
         except ValueError:
             print("  enter a number like 1.1")
 
-    volume = 100
-    vol_in = input(f"\nHow loud should I be? 0-100 [{volume}] (Enter to keep) > ").strip()
+    try:
+        volume = min(190, max(0, int(float(cfg.get("CLAUDE_TALK_VOLUME") or 100))))
+    except ValueError:
+        volume = 100
+    vol_in = input(
+        f"\nHow loud should I be? 100 = normal, up to 190 louder [{volume}]"
+        " (Enter to keep) > "
+    ).strip()
     if vol_in:
         try:
-            volume = min(100, max(0, int(float(vol_in))))
+            volume = min(190, max(0, int(float(vol_in))))
         except ValueError:
-            print("  keeping 100")
+            print(f"  keeping {volume}")
     try:
         print("  previewing volume...")
         play(kokoro, voice, speed, "This is my speaking volume.", volume / 100.0)
     except Exception:
         pass
 
+    duck = "off" if cfg.get("CLAUDE_TALK_DUCK", "on").strip().lower() in (
+        "0", "off", "false", "no", ""
+    ) else "on"
+    yn = "[Y/n]" if duck == "on" else "[y/N]"
     duck_in = input(
-        "\nDim other audio (music, video) while I speak? [Y/n] > "
+        f"\nDim other audio (music, video) while I speak? {yn} (Enter to keep) > "
     ).strip().lower()
-    duck = "off" if duck_in in ("n", "no", "off", "0", "false") else "on"
+    if duck_in:
+        duck = "off" if duck_in in ("n", "no", "off", "0", "false") else "on"
 
-    name = input("\nWhat should I call you? (optional, Enter to skip) > ").strip()
+    name = cfg.get("CLAUDE_TALK_NAME", "")
+    name_in = input(
+        f"\nWhat should I call you? [{name or 'no name'}] (Enter to keep) > "
+    ).strip()
+    if name_in:
+        name = name_in
 
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
     with open(CONFIG, "w") as f:
@@ -112,6 +165,8 @@ def main():
         f.write(f'CLAUDE_TALK_NAME="{name}"\n')
         f.write(f"CLAUDE_TALK_VOLUME={volume}\n")
         f.write(f"CLAUDE_TALK_DUCK={duck}\n")
+        for line in extras:
+            f.write(f"{line}\n")
 
     print(f"\nSaved {CONFIG}")
     print(f"  voice  = {voice}")

@@ -59,6 +59,29 @@ Then grant **skhd** Accessibility permission (System Settings → Privacy & Secu
 
 These use the **Option** modifier (`alt`) on purpose: `skhd` captures whatever combo you bind _globally_, so a `cmd`-based one would shadow app shortcuts everywhere it runs (e.g. `cmd - r` would swallow browser/Finder reload). Pick any keys you like, but avoid ones you rely on elsewhere.
 
+### Completion chime (optional): stay silent while Claude talks
+
+If you have a `Stop` hook that plays a "done" chime, it will chime on top of the
+voice. To avoid that, every spoken line touches a per-session marker file:
+
+```
+~/.claude/claude-talk/spoke-<session_id>
+```
+
+Make your chime hook skip the sound when the marker is fresh, e.g.:
+
+```bash
+SID=$(sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+M="$HOME/.claude/claude-talk/spoke-$SID"
+if [ -n "$SID" ] && [ -f "$M" ] && [ $(( $(date +%s) - $(stat -f %m "$M") )) -lt 20 ]; then
+  exit 0  # claude-talk just spoke — skip the chime
+fi
+afplay /System/Library/Sounds/Glass.aiff
+```
+
+Markers older than a day are cleaned up automatically. If you don't use a chime
+hook, the marker is harmless and you can ignore all of this.
+
 ## How it works
 
 - **Engine:** [Kokoro-82M](https://github.com/hexgrad/kokoro) via [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx), run locally. 28 voices, US & UK, no API key.
