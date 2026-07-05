@@ -74,7 +74,7 @@ Settings live in `~/.claude/claude-talk/config.env`:
 KOKORO_VOICE=af_heart    # e.g. af_bella, am_michael, bf_emma, bm_george
 KOKORO_SPEED=1.0         # 0.8–1.3
 CLAUDE_TALK_NAME=""      # optional; what Claude calls you
-CLAUDE_TALK_VOLUME=100   # Claude's own voice loudness, 0–100
+CLAUDE_TALK_VOLUME=100   # Claude's voice loudness; 100 = normal, up to ~190 louder
 CLAUDE_TALK_DUCK=on      # dim other audio (music, video) while Claude speaks
 ```
 
@@ -82,19 +82,22 @@ Change these with `/talk-setup`, or re-run the picker: `install.sh --configure`.
 
 ### Volume and ducking
 
-- **`CLAUDE_TALK_VOLUME`** sets how loud Claude's voice is, applied as `afplay`'s
-  per-instance gain. It's **independent of your system volume** — turning Claude
-  down doesn't touch anything else, and it never changes your global volume.
+- **`CLAUDE_TALK_VOLUME`** sets Claude's loudness, applied as `afplay`'s
+  per-instance gain. `100` is unity; the Kokoro voice sits a little below full
+  scale, so values **above 100 (up to ~190)** make Claude louder by using that
+  headroom (playback clamps so a boosted value never distorts).
 - **`CLAUDE_TALK_DUCK`** dims other audio while Claude speaks, then restores it.
-  macOS has no way to lower only other apps, so this briefly lowers the **global**
-  output volume and boosts Claude's own gain to compensate — the net effect is
-  music/video drop while Claude stays about as loud as before.
+  macOS has no way to lower only _other_ apps, so this briefly lowers the
+  **global** output volume and boosts Claude's own gain to compensate — the net
+  effect is music/video drop while Claude stays about as loud as before.
 
-The ducking is designed **not to fight you**: it dims once at the start of a
-speaking burst and restores once after a short hold (no per-line flicker), it
-dims _relative_ to wherever your volume already is, and if you move the volume
-yourself while Claude is talking it detects that and backs off instead of
-snapping your change back. A crash mid-speech is recovered on the next line, so
+The volume knob still controls everything the way you'd expect. If you change the
+system volume **while Claude is speaking**, ducking _re-centers_ the whole mix on
+your new level — Claude and the other audio move together, the other audio stays
+tucked under Claude, and your change persists after Claude finishes. Change the
+volume in a gap (Claude silent) and it's a plain global change, left untouched.
+Ducking happens once per speaking burst and restores once after a short hold (no
+per-line flicker), and a crash mid-speech is recovered on the next line, so
 you're never left stuck at a lowered volume.
 
 Advanced tuning (optional, add to `config.env`):
@@ -104,9 +107,12 @@ CLAUDE_TALK_DUCK_RATIO=0.5   # duck other audio to this fraction of current volu
 CLAUDE_TALK_DUCK_HOLD=1.2    # seconds to stay ducked after a line before restoring
 ```
 
-Ducking lowers the global volume, so it dims **all** other audio — browser tabs,
-YouTube, games, anything — not just scriptable players. To turn it off entirely,
-set `CLAUDE_TALK_DUCK=off`.
+A **lower** `CLAUDE_TALK_DUCK_RATIO` ducks other audio harder (e.g. `0.4` drops
+it to 40%). Note the trade-off: the Kokoro voice has limited headroom, so the
+harder you duck, the more Claude's own level drops with it — against very loud
+music Claude can't fully out-shout it. Ducking lowers the global volume, so it
+dims **all** other audio — browser tabs, YouTube, games — not just scriptable
+players. To turn ducking off entirely, set `CLAUDE_TALK_DUCK=off`.
 
 ## Uninstall
 

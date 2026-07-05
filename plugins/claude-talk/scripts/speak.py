@@ -46,12 +46,13 @@ def main():
 
     # Claude's own volume, plus a one-shot duck of other audio while we speak.
     s = kc.env_settings()
-    gain = kc.gain_from_volume(s["volume"])
+    base = kc.gain_from_volume(s["volume"])
+    gain = min(base, kc.clip_ceiling(audio))  # un-ducked gain, never clipping
     duck_state = None
     if s["duck"]:
         duck_state = kc.duck_start(s["ratio"])
         if duck_state:
-            gain = kc.duck_boosted_gain(gain, s["ratio"], audio)
+            gain = kc.duck_boosted_gain(base, s["ratio"], audio)
 
     proc = None
 

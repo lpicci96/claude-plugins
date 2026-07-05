@@ -70,13 +70,16 @@ def find_espeak():
 
 
 def gain_from_volume(vol):
-    """Map a 0-100 volume to an afplay `-v` gain (0.0-1.0). Linear; 100 = unity,
-    which for Kokoro's ~-6 dBFS output still leaves headroom to boost."""
+    """Map CLAUDE_TALK_VOLUME to an afplay `-v` gain. Linear: 100 = unity (1.0).
+    Kokoro peaks near -6 dBFS, so values above 100 amplify into that headroom
+    (up to ~190 before clipping); playback clamps to the per-line clip ceiling so
+    a boosted value never distorts. Above 100 is only audible with ducking off —
+    while ducking, the compensation already pushes the gain to the ceiling."""
     try:
         v = int(float(vol))
     except (TypeError, ValueError):
         v = 100
-    return min(1.0, max(0.0, v / 100.0))
+    return min(DUCK_GAIN_CAP, max(0.0, v / 100.0))
 
 
 def clip_ceiling(audio):

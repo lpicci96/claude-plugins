@@ -46,19 +46,26 @@ IDLE_TIMEOUT = 1800  # exit after 30 min with no requests
 class Ducker:
     """Smart output-volume ducking for a speaking burst.
 
-    Ducks the global volume once when a burst starts and restores it once, after
-    a short hold, when the burst ends — so back-to-back lines don't flicker the
-    volume. Never fights the user: if the volume no longer sits at the value we
-    set (they moved it, or another app did), we adopt their choice and stop
-    ducking for the rest of the burst instead of clobbering it. All per-request
-    settings are passed in so the long-lived daemon honors the latest config.
+    While Claude speaks, the global volume is lowered so other audio (music, a
+    video) tucks under Claude, and Claude's own gain is boosted to compensate so
+    it stays about as loud as before. The duck happens once at the start of a
+    burst and is restored once, after a short hold, at the end — so back-to-back
+    lines don't flicker the volume.
+
+    The volume knob still controls everything: if you change the system volume
+    mid-speech, we *re-center* the whole mix on your new level (adopt it as the
+    new baseline and re-duck from it) rather than fighting or abandoning the
+    duck. So turning the volume down drops Claude and the music together, keeps
+    the music tucked under Claude, and the change persists after the burst. A
+    change made in the gap between bursts is a plain global change and is left
+    alone. All per-request settings are passed in so the long-lived daemon
+    honors the latest config.
     """
 
     def __init__(self):
         self.lock = threading.Lock()
         self.ducked = False       # we have lowered the global volume
-        self.suspended = False    # user took control mid-burst; back off
-        self.g_orig = None        # volume before we ducked
+        self.g_orig = None        # baseline to restore to (tracks user changes)
         self.g_duck = None        # volume we ducked to
         self.timer = None         # pending restore
 
@@ -66,29 +73,26 @@ class Ducker:
         """Ensure the right duck state for the line about to play; return the
         afplay gain to use for it."""
         base = kc.gain_from_volume(s["volume"])
+        flat = min(base, kc.clip_ceiling(audio))  # un-ducked gain, never clipping
         with self.lock:
             self._cancel_timer()
             if not s["duck"]:
                 # Ducking off (or just toggled off): undo any duck, play flat.
                 self._restore_locked()
-                self.suspended = False
-                return base
-            if self.suspended:
-                return base
+                return flat
             cur, muted = kc.get_volume_state()
-            if self.ducked:
-                if cur is None or cur == self.g_duck:
-                    return kc.duck_boosted_gain(base, s["ratio"], audio)
-                # Volume moved out from under us -> the user is in charge now.
-                self.ducked = False
-                self.suspended = True
-                kc.clear_duck_marker()
-                return base
             if cur is None or muted or cur <= 0:
-                return base
+                # Can't read it, muted, or already silent — nothing to duck.
+                self._drop_state()
+                return flat
+            if self.ducked and cur == self.g_duck:
+                return kc.duck_boosted_gain(base, s["ratio"], audio)  # continue
+            # Either starting a burst, or the user moved the volume mid-burst:
+            # (re-)duck from the current level, re-centering the mix on it.
             g_duck = round(cur * s["ratio"])
             if g_duck >= cur:
-                return base
+                self._drop_state()  # ratio too gentle to change anything
+                return flat
             kc.set_system_volume(g_duck)
             self.g_orig, self.g_duck, self.ducked = cur, g_duck, True
             kc.save_duck_marker(cur, g_duck)
@@ -98,7 +102,7 @@ class Ducker:
         """A line finished: arm the restore so the volume comes back once the
         burst has been quiet for the hold window."""
         with self.lock:
-            if not (self.ducked or self.suspended):
+            if not self.ducked:
                 return
             self._cancel_timer()
             self.timer = threading.Timer(s["hold"], self._on_hold)
@@ -110,19 +114,25 @@ class Ducker:
         with self.lock:
             self._cancel_timer()
             self._restore_locked()
-            self.suspended = False
 
     def _on_hold(self):
         with self.lock:
             self.timer = None
             self._restore_locked()
-            self.suspended = False  # burst over
 
     def _restore_locked(self):
+        # Restore the baseline, but only if the volume is still where we ducked
+        # it — if it changed in the gap, that's a plain global change; leave it.
         if self.ducked:
             cur, _ = kc.get_volume_state()
             if cur is None or cur == self.g_duck:
                 kc.set_system_volume(self.g_orig)
+            kc.clear_duck_marker()
+            self.ducked = False
+
+    def _drop_state(self):
+        # Forget the duck without changing the volume (we no longer own it).
+        if self.ducked:
             kc.clear_duck_marker()
             self.ducked = False
 
