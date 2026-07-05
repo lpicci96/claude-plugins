@@ -47,67 +47,83 @@ IDLE_TIMEOUT = 1800  # exit after 30 min with no requests
 
 
 class Ducker:
-    """Smart output-volume ducking for a speaking burst.
+    """Per-app ducking for a speaking burst — never touches the system volume.
 
-    While Claude speaks, the global volume is lowered so other audio (music, a
-    video) tucks under Claude, and Claude's own gain is boosted to compensate so
-    it stays about as loud as before. The duck happens once at the start of a
-    burst and is restored once, after a short hold, at the end — so back-to-back
-    lines don't flicker the volume.
+    Claude's voice plays at its own afplay gain. To make it stand out we reach
+    into each media app that's actually playing (Spotify, Apple Music) and lower
+    THAT app's own volume, then restore it after a short hold. The global output
+    volume and Claude's voice are left alone — so your volume dial always does
+    exactly what you expect and your setting always sticks, and there's nothing
+    to fight. Apps with no scriptable volume (browsers, etc.) simply aren't
+    ducked; Claude just plays over them at its set loudness.
 
-    The volume knob still controls everything: if you change the system volume
-    mid-speech, we *re-center* the whole mix on your new level (adopt it as the
-    new baseline and re-duck from it) rather than fighting or abandoning the
-    duck. So turning the volume down drops Claude and the music together, keeps
-    the music tucked under Claude, and the change persists after the burst. A
-    change made in the gap between bursts is a plain global change and is left
-    alone. All per-request settings are passed in so the long-lived daemon
-    honors the latest config.
+    We duck once at the start of a burst and restore once at the end, so
+    back-to-back lines don't flicker an app's volume. We remember each app's true
+    pre-duck volume across the whole burst-chain and only recapture it when the
+    app has clearly moved on its own — so we never clobber a change you make
+    mid-speech, and repeated duck/restore cycles don't slowly drift the volume
+    down (app volumes quantize by a point per set). All per-request settings are
+    passed in so the long-lived daemon honors the latest config.
     """
+
+    SLOP = kc.APP_SLOP
 
     def __init__(self):
         self.lock = threading.Lock()
-        self.ducked = False       # we have lowered the global volume
-        self.g_orig = None        # baseline to restore to (tracks user changes)
-        self.g_duck = None        # volume we ducked to
-        self.timer = None         # pending restore
+        self.orig = {}     # app -> true pre-duck volume (persists across turns)
+        self.duck = {}     # app -> volume we ducked it to
+        self.active = set()  # apps currently ducked (restore targets)
+        self.timer = None  # pending restore / burst-end
 
-    def begin(self, audio, s):
-        """Ensure the right duck state for the line about to play; return the
-        afplay gain to use for it."""
-        base = kc.gain_from_volume(s["volume"])
-        flat = min(base, kc.clip_ceiling(audio))  # un-ducked gain, never clipping
-        # Never duck harder than keeps Claude at its set volume (see kc docs).
-        ratio = kc.effective_ratio(base, s["ratio"])
+    def begin(self, s):
+        """Duck the playing apps for the line about to start (idempotent within a
+        burst)."""
         with self.lock:
             self._cancel_timer()
             if not s["duck"]:
-                # Ducking off (or just toggled off): undo any duck, play flat.
                 self._restore_locked()
-                return flat
-            cur, muted = kc.get_volume_state()
-            if cur is None or muted or cur <= 0:
-                # Can't read it, muted, or already silent — nothing to duck.
-                self._drop_state()
-                return flat
-            if self.ducked and cur == self.g_duck:
-                return kc.duck_boosted_gain(base, ratio, audio)  # continue
-            # Either starting a burst, or the user moved the volume mid-burst:
-            # (re-)duck from the current level, re-centering the mix on it.
-            g_duck = round(cur * ratio)
-            if g_duck >= cur:
-                self._drop_state()  # ratio too gentle to change anything
-                return flat
-            kc.set_system_volume(g_duck)
-            self.g_orig, self.g_duck, self.ducked = cur, g_duck, True
-            kc.save_duck_marker(cur, g_duck)
-            return kc.duck_boosted_gain(base, ratio, audio)
+                return
+            ratio = s["ratio"]
+            for app in s["apps"]:
+                st = kc.app_duck_state(app)
+                if st is None or st[0] != "playing" or st[1] <= 0:
+                    # Not running / not playing / already silent: don't newly
+                    # duck. If we already ducked it (e.g. paused mid-burst), it
+                    # stays in `active` so the burst-end restore still fires.
+                    continue
+                vol = st[1]
+                if app in self.active and abs(vol - self.duck.get(app, -1)) <= self.SLOP:
+                    continue  # already ducked and still there — keep going
+                # Recover the true original: if the app is sitting where we last
+                # left it (at our duck level or the orig we recorded), reuse that
+                # exact orig so restores don't drift; otherwise it moved on its
+                # own, so adopt the current level as the new original.
+                known = self.orig.get(app)
+                if known is not None and (
+                    abs(vol - known) <= self.SLOP
+                    or abs(vol - self.duck.get(app, -1)) <= self.SLOP
+                ):
+                    orig = known
+                else:
+                    orig = vol
+                duck = round(orig * ratio)
+                if duck >= orig:
+                    continue
+                kc.set_app_volume(app, duck)
+                self.orig[app], self.duck[app] = orig, duck
+                self.active.add(app)
+            if self.active:
+                kc.save_app_duck_marker(
+                    {a: {"orig": self.orig[a], "duck": self.duck[a]} for a in self.active}
+                )
+            else:
+                kc.clear_app_duck_marker()
 
     def end(self, s):
-        """A line finished: arm the restore so the volume comes back once the
-        burst has been quiet for the hold window."""
+        """A line finished: arm the restore so the apps come back once the burst
+        has been quiet for the hold window."""
         with self.lock:
-            if not self.ducked:
+            if not self.active:
                 return
             self._cancel_timer()
             self.timer = threading.Timer(s["hold"], self._on_hold)
@@ -126,20 +142,14 @@ class Ducker:
             self._restore_locked()
 
     def _restore_locked(self):
-        # Restore the baseline, but only if the volume is still where we ducked
-        # it — if it changed in the gap, that's a plain global change; leave it.
-        if self.ducked:
-            cur, _ = kc.get_volume_state()
-            if cur is None or cur == self.g_duck:
-                kc.set_system_volume(self.g_orig)
-            kc.clear_duck_marker()
-            self.ducked = False
-
-    def _drop_state(self):
-        # Forget the duck without changing the volume (we no longer own it).
-        if self.ducked:
-            kc.clear_duck_marker()
-            self.ducked = False
+        # Restore each ducked app to its remembered original, but only if it's
+        # still where we ducked it — if it moved, that's the user's level now.
+        for app in self.active:
+            st = kc.app_duck_state(app)
+            if st is None or abs(st[1] - self.duck[app]) <= self.SLOP:
+                kc.set_app_volume(app, self.orig[app])
+        self.active = set()
+        kc.clear_app_duck_marker()
 
     def _cancel_timer(self):
         if self.timer is not None:
@@ -221,7 +231,10 @@ class Player:
                         out = f.name
                     sf.write(out, audio, sr)
                     delete_after = True
-                gain = self.ducker.begin(audio, settings)
+                # Claude's own loudness (independent of the system volume, never
+                # ducked); duck the other apps in parallel.
+                gain = min(kc.gain_from_volume(settings["volume"]), kc.clip_ceiling(audio))
+                self.ducker.begin(settings)
                 with self.lock:
                     if gen != self.generation:
                         continue
@@ -270,11 +283,16 @@ def _settings(req):
         "no",
         "",
     )
+    raw_apps = str(req.get("duck_apps", "")).strip()
+    apps = [a.strip() for a in raw_apps.split(",") if a.strip()] or list(
+        kc.DEFAULT_DUCK_APPS
+    )
     return {
         "volume": min(190, max(0, num("volume", 100, lambda x: int(float(x))))),
         "duck": duck,
-        "ratio": min(0.95, max(0.1, num("duck_ratio", 0.5, float))),
+        "ratio": min(0.95, max(0.0, num("duck_ratio", 0.25, float))),
         "hold": max(0.0, num("duck_hold", 1.2, float)),
+        "apps": apps,
     }
 
 
