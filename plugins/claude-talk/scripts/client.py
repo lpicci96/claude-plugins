@@ -21,6 +21,17 @@ VENV_PY = os.path.join(DATA, "venv", "bin", "python")
 DAEMON = os.path.join(HERE, "daemon.py")
 
 
+def settings():
+    """Volume + ducking settings from the environment (set by common.sh from
+    config.env), sent per-request so the long-lived daemon honors the latest."""
+    return {
+        "volume": os.environ.get("CLAUDE_TALK_VOLUME", "100"),
+        "duck": os.environ.get("CLAUDE_TALK_DUCK", "on"),
+        "duck_ratio": os.environ.get("CLAUDE_TALK_DUCK_RATIO", "0.5"),
+        "duck_hold": os.environ.get("CLAUDE_TALK_DUCK_HOLD", "1.2"),
+    }
+
+
 def connect():
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(SOCK)
@@ -61,7 +72,7 @@ def send_replay():
     except OSError:
         return 2  # no daemon -> fall back
     try:
-        s.sendall(json.dumps({"replay": True}).encode("utf-8"))
+        s.sendall(json.dumps({"replay": True, **settings()}).encode("utf-8"))
         s.shutdown(socket.SHUT_WR)
         ack = s.recv(16)
         return 0 if ack.strip() == b"OK" else 2
@@ -91,6 +102,7 @@ def main():
             # Cache this line's audio for instant replay, unless it's a
             # fire-and-forget interim line (KOKORO_NOWAIT).
             "remember": not os.environ.get("KOKORO_NOWAIT"),
+            **settings(),
         }
     ).encode("utf-8")
 

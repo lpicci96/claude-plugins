@@ -71,14 +71,42 @@ These use the **Option** modifier (`alt`) on purpose: `skhd` captures whatever c
 Settings live in `~/.claude/claude-talk/config.env`:
 
 ```sh
-KOKORO_VOICE=af_heart   # e.g. af_bella, am_michael, bf_emma, bm_george
-KOKORO_SPEED=1.0        # 0.8–1.3
-CLAUDE_TALK_NAME=""     # optional; what Claude calls you
+KOKORO_VOICE=af_heart    # e.g. af_bella, am_michael, bf_emma, bm_george
+KOKORO_SPEED=1.0         # 0.8–1.3
+CLAUDE_TALK_NAME=""      # optional; what Claude calls you
+CLAUDE_TALK_VOLUME=100   # Claude's own voice loudness, 0–100
+CLAUDE_TALK_DUCK=on      # dim other audio (music, video) while Claude speaks
 ```
 
-Claude speaks at your current system volume and never changes it.
-
 Change these with `/talk-setup`, or re-run the picker: `install.sh --configure`.
+
+### Volume and ducking
+
+- **`CLAUDE_TALK_VOLUME`** sets how loud Claude's voice is, applied as `afplay`'s
+  per-instance gain. It's **independent of your system volume** — turning Claude
+  down doesn't touch anything else, and it never changes your global volume.
+- **`CLAUDE_TALK_DUCK`** dims other audio while Claude speaks, then restores it.
+  macOS has no way to lower only other apps, so this briefly lowers the **global**
+  output volume and boosts Claude's own gain to compensate — the net effect is
+  music/video drop while Claude stays about as loud as before.
+
+The ducking is designed **not to fight you**: it dims once at the start of a
+speaking burst and restores once after a short hold (no per-line flicker), it
+dims _relative_ to wherever your volume already is, and if you move the volume
+yourself while Claude is talking it detects that and backs off instead of
+snapping your change back. A crash mid-speech is recovered on the next line, so
+you're never left stuck at a lowered volume.
+
+Advanced tuning (optional, add to `config.env`):
+
+```sh
+CLAUDE_TALK_DUCK_RATIO=0.5   # duck other audio to this fraction of current volume
+CLAUDE_TALK_DUCK_HOLD=1.2    # seconds to stay ducked after a line before restoring
+```
+
+Ducking lowers the global volume, so it dims **all** other audio — browser tabs,
+YouTube, games, anything — not just scriptable players. To turn it off entirely,
+set `CLAUDE_TALK_DUCK=off`.
 
 ## Uninstall
 
