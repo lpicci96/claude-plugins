@@ -44,25 +44,21 @@ def main():
         out = f.name
     sf.write(out, audio, sr)
 
-    # Claude's own volume, plus a one-shot duck of other audio while we speak.
+    # Claude's own volume (independent of the system volume, never ducked), plus
+    # a one-shot duck of the media apps that are playing while we speak.
     s = kc.env_settings()
-    base = kc.gain_from_volume(s["volume"])
-    gain = min(base, kc.clip_ceiling(audio))  # un-ducked gain, never clipping
-    duck_state = None
-    if s["duck"]:
-        ratio = kc.effective_ratio(base, s["ratio"])  # never drop Claude below its volume
-        duck_state = kc.duck_start(ratio)
-        if duck_state:
-            gain = kc.duck_boosted_gain(base, ratio, audio)
+    gain = min(kc.gain_from_volume(s["volume"]), kc.clip_ceiling(audio))
+    duck_state = kc.app_duck_start(s["apps"], s["ratio"]) if s["duck"] else {}
 
     proc = None
 
     def _die(*_):
-        # SIGTERM bypasses try/finally, so kill the child, un-duck, and clean up
-        # here — otherwise a hard kill leaves afplay running and the volume low.
+        # SIGTERM bypasses try/finally, so kill the child, un-duck the apps, and
+        # clean up here — otherwise a hard kill leaves afplay running and an app
+        # stuck quiet.
         if proc is not None and proc.poll() is None:
             proc.terminate()
-        kc.duck_stop(duck_state)
+        kc.app_duck_stop(duck_state)
         try:
             os.unlink(out)
         except OSError:
@@ -74,7 +70,7 @@ def main():
         proc = subprocess.Popen(["afplay", "-v", f"{gain:.3f}", out])
         proc.wait()
     finally:
-        kc.duck_stop(duck_state)
+        kc.app_duck_stop(duck_state)
         os.unlink(out)
     return 0
 

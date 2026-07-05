@@ -27,8 +27,9 @@ def settings():
     return {
         "volume": os.environ.get("CLAUDE_TALK_VOLUME", "100"),
         "duck": os.environ.get("CLAUDE_TALK_DUCK", "on"),
-        "duck_ratio": os.environ.get("CLAUDE_TALK_DUCK_RATIO", "0.5"),
+        "duck_ratio": os.environ.get("CLAUDE_TALK_DUCK_RATIO", "0.25"),
         "duck_hold": os.environ.get("CLAUDE_TALK_DUCK_HOLD", "1.2"),
+        "duck_apps": os.environ.get("CLAUDE_TALK_DUCK_APPS", ""),
     }
 
 

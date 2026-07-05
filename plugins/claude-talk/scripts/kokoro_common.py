@@ -12,6 +12,15 @@ MAX_CHARS = 400
 # before clipping; clip_ceiling() computes the exact value per line when it can.
 DUCK_GAIN_CAP = 1.9
 
+# Media apps we know how to duck (their own AppleScript `sound volume`).
+DEFAULT_DUCK_APPS = ("Spotify", "Music")
+
+# An app volume read can round-trip a point off what we set (Spotify quantizes,
+# e.g. set 52 -> reads 51), so treat anything this close to a value we set as
+# "unchanged" — both so we never clobber a real user change and so repeated
+# duck/restore cycles don't slowly drift the volume down.
+APP_SLOP = 2
+
 
 def data_dir():
     """Runtime data directory (venv, model, socket, config). Fixed, not derived
@@ -52,29 +61,29 @@ def find_espeak():
             return
 
 
-# --- Volume + ducking ------------------------------------------------------
+# --- Volume + per-app ducking ----------------------------------------------
 #
-# Two independent controls:
-#   * Claude's own voice loudness — applied as afplay's per-instance `-v` gain,
-#     which never touches the global output volume or any other app.
-#   * Ducking — while Claude speaks, briefly lower the GLOBAL output volume so
-#     other audio (music, a video) drops, then boost Claude's own `-v` gain to
-#     compensate so Claude stays roughly as loud as before. The global cancels
-#     out of the Claude-vs-other balance, so the amount Claude stands out is
-#     pure digital gain and independent of the output device.
+# Two fully independent controls, and NEITHER touches the global output volume —
+# so your volume dial always means exactly what you set, and it sticks:
 #
-# The stateful "duck once per burst, restore once, never fight the user" logic
-# lives in the daemon's Ducker; these are the low-level primitives it (and the
-# one-shot speak.py path) build on. All settings are passed in explicitly so the
-# long-lived daemon can honor per-request values instead of its stale env.
+#   * Claude's own voice loudness — afplay's per-instance `-v` gain, from
+#     CLAUDE_TALK_VOLUME. 100 = play at the current output volume; higher
+#     amplifies into Kokoro's headroom (clamped per line so it never clips).
+#   * Ducking — while Claude speaks, lower the *own volume of the media apps
+#     that are currently playing* (Spotify, Apple Music) via AppleScript, then
+#     restore it. Only those apps dip; the system volume and Claude's voice are
+#     left alone. Apps with no scriptable volume (browsers, etc.) aren't ducked.
+#
+# The stateful "duck once per burst, restore once, never clobber the user, never
+# drift" logic lives in the daemon's Ducker; app_duck_start/app_duck_stop are the
+# simple one-shot equivalents for the non-daemon fallback path.
 
 
 def gain_from_volume(vol):
     """Map CLAUDE_TALK_VOLUME to an afplay `-v` gain. Linear: 100 = unity (1.0).
     Kokoro peaks near -6 dBFS, so values above 100 amplify into that headroom
     (up to ~190 before clipping); playback clamps to the per-line clip ceiling so
-    a boosted value never distorts. Above 100 is only audible with ducking off —
-    while ducking, the compensation already pushes the gain to the ceiling."""
+    a boosted value never distorts."""
     try:
         v = int(float(vol))
     except (TypeError, ValueError):
@@ -96,132 +105,128 @@ def clip_ceiling(audio):
     return min(4.0, 0.97 / peak)
 
 
-def duck_boosted_gain(base, ratio, audio=None):
-    """Gain to play Claude at while ducked: boost by 1/ratio to counter the
-    lowered global, capped so the line never clips."""
-    if ratio <= 0:
-        return base
-    return min(base / ratio, clip_ceiling(audio))
-
-
-def effective_ratio(base, requested):
-    """The duck fraction actually applied to other audio.
-
-    Ducking lowers the global volume and boosts Claude's gain to compensate, but
-    that boost is capped at the clip ceiling. Below `base / DUCK_GAIN_CAP` the
-    boost can't keep up, so Claude drops below its set volume — and since the
-    Claude-vs-other gap is itself capped by that ceiling, ducking harder widens
-    nothing, it only pulls Claude down. So we floor the ratio at that "sweet
-    spot": the most aggressive duck that still keeps Claude at its volume, which
-    already gives the maximum gap. A larger (gentler) requested ratio is honored.
-    """
-    if base <= 0:
-        return min(0.95, max(0.1, requested))
-    return min(0.95, max(base / DUCK_GAIN_CAP, requested, 0.1))
-
-
-def get_volume_state():
-    """Current macOS output as (volume 0-100, muted bool); (None, False) if it
-    can't be read."""
+def _osa(*lines):
+    """Run an AppleScript (pass each line as a separate arg); return stdout text
+    stripped, or None on any error / non-zero exit."""
     try:
-        out = subprocess.run(
-            [
-                "osascript",
-                "-e",
-                "set v to get volume settings",
-                "-e",
-                '(output volume of v as text) & " " & (output muted of v as text)',
-            ],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        vol_txt, muted_txt = out.stdout.strip().split()
-        return int(vol_txt), muted_txt.lower() == "true"
+        cmd = ["osascript"]
+        for ln in lines:
+            cmd += ["-e", ln]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+        return out.stdout.strip() if out.returncode == 0 else None
     except Exception:
-        return None, False
+        return None
 
 
-def set_system_volume(level):
+def app_duck_state(app):
+    """Return (player_state, sound_volume) for a media app, read ONLY if the app
+    is already running — the System Events guard means we never launch it. None
+    if it isn't running or can't be read. player_state is e.g. "playing" /
+    "paused"; sound_volume is 0-100."""
+    r = _osa(
+        'tell application "System Events"',
+        f'  if exists process "{app}" then',
+        f'    tell application "{app}" to (player state as text)'
+        ' & " " & (sound volume as text)',
+        "  end if",
+        "end tell",
+    )
+    if not r:
+        return None
+    parts = r.split()
+    if len(parts) < 2:
+        return None
     try:
-        subprocess.run(
-            ["osascript", "-e", f"set volume output volume {int(level)}"],
-            capture_output=True,
-            timeout=2,
-        )
-    except Exception:
-        pass
+        return parts[0], int(parts[1])
+    except ValueError:
+        return None
 
 
-def _duck_marker():
+def set_app_volume(app, level):
+    _osa(f'tell application "{app}" to set sound volume to {int(level)}')
+
+
+def _marker():
     return os.path.join(data_dir(), "duck_state.json")
 
 
-def save_duck_marker(g_orig, g_duck):
-    """Persist the pre-duck and ducked volumes so a hard kill mid-speech (which
-    skips normal restore) can be recovered on the next start."""
+def save_app_duck_marker(state):
+    """Persist {app: {"orig": o, "duck": d}} so a hard kill mid-duck (which skips
+    the normal restore) can be recovered on the next start — otherwise the app is
+    left sitting quiet."""
     try:
-        with open(_duck_marker(), "w") as f:
-            json.dump({"g_orig": int(g_orig), "g_duck": int(g_duck)}, f)
+        with open(_marker(), "w") as f:
+            json.dump(state, f)
     except OSError:
         pass
 
 
-def read_duck_marker():
+def clear_app_duck_marker():
     try:
-        with open(_duck_marker()) as f:
-            d = json.load(f)
-        return int(d["g_orig"]), int(d["g_duck"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
-def clear_duck_marker():
-    try:
-        os.unlink(_duck_marker())
+        os.unlink(_marker())
     except OSError:
         pass
 
 
 def recover_duck():
-    """If a previous run was killed while ducked, restore the saved volume and
-    clear the marker. Only restores if the system is still sitting at the ducked
-    level — if it changed, the user or another app took over, so leave it."""
-    m = read_duck_marker()
-    if not m:
+    """If a previous run was killed while an app was ducked, restore that app's
+    volume — but only if it's still sitting where we ducked it (else the user or
+    the app itself took over; leave it)."""
+    try:
+        with open(_marker()) as f:
+            state = json.load(f)
+    except (OSError, ValueError):
         return
-    g_orig, g_duck = m
-    cur, _ = get_volume_state()
-    if cur is None or cur == g_duck:
-        set_system_volume(g_orig)
-    clear_duck_marker()
+    if isinstance(state, dict):
+        for app, v in state.items():
+            try:
+                orig, duck = int(v["orig"]), int(v["duck"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            st = app_duck_state(app)
+            if st is None or abs(st[1] - duck) <= APP_SLOP:
+                set_app_volume(app, orig)
+    clear_app_duck_marker()
 
 
-def duck_start(ratio):
-    """One-shot duck: lower the global volume to `ratio` of its current level,
-    once. Returns (g_orig, g_duck) to pass back to duck_stop, or None if there
-    was nothing to duck (unreadable, muted, already low)."""
-    cur, muted = get_volume_state()
-    if cur is None or muted or cur <= 0:
-        return None
-    g_duck = round(cur * ratio)
-    if g_duck >= cur:
-        return None
-    set_system_volume(g_duck)
-    save_duck_marker(cur, g_duck)
-    return cur, g_duck
+def app_duck_start(apps, ratio):
+    """One-shot duck for the non-daemon path: lower each currently-playing app's
+    own volume to `ratio` of its level, once. Returns {app: {orig, duck}} to hand
+    back to app_duck_stop (empty if nothing was playing to duck)."""
+    state = {}
+    for app in apps:
+        st = app_duck_state(app)
+        if st is None or st[0] != "playing" or st[1] <= 0:
+            continue
+        orig = st[1]
+        duck = round(orig * ratio)
+        if duck >= orig:
+            continue
+        set_app_volume(app, duck)
+        state[app] = {"orig": orig, "duck": duck}
+    if state:
+        save_app_duck_marker(state)
+    return state
 
 
-def duck_stop(state):
-    """Undo a duck_start — but only if the system is still at the level we set,
+def app_duck_stop(state):
+    """Undo app_duck_start — restore each app only if it's still where we set it,
     so we never clobber a change the user made while we were speaking."""
     if not state:
         return
-    g_orig, g_duck = state
-    cur, _ = get_volume_state()
-    if cur is None or cur == g_duck:
-        set_system_volume(g_orig)
-    clear_duck_marker()
+    for app, v in state.items():
+        st = app_duck_state(app)
+        if st is None or abs(st[1] - v["duck"]) <= APP_SLOP:
+            set_app_volume(app, v["orig"])
+    clear_app_duck_marker()
+
+
+def duck_apps(env=None):
+    """Which apps to duck: CLAUDE_TALK_DUCK_APPS (comma-separated), or the
+    defaults. Names are AppleScript application names, e.g. "Spotify", "Music"."""
+    raw = (env or os.environ).get("CLAUDE_TALK_DUCK_APPS", "")
+    apps = [a.strip() for a in raw.split(",") if a.strip()]
+    return apps or list(DEFAULT_DUCK_APPS)
 
 
 def env_settings():
@@ -244,8 +249,9 @@ def env_settings():
     return {
         "volume": os.environ.get("CLAUDE_TALK_VOLUME", "100"),
         "duck": duck,
-        "ratio": min(0.95, max(0.1, _float("CLAUDE_TALK_DUCK_RATIO", "0.5"))),
+        "ratio": min(0.95, max(0.0, _float("CLAUDE_TALK_DUCK_RATIO", "0.25"))),
         "hold": max(0.0, _float("CLAUDE_TALK_DUCK_HOLD", "1.2")),
+        "apps": duck_apps(),
     }
 
 
