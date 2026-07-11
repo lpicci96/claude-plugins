@@ -2,17 +2,38 @@
 """Persistent Kokoro TTS daemon for claude-talk.
 
 Loads the model once and stays resident on a Unix socket. Requests are JSON:
-  {"voice": "...", "speed": 1.0, "text": "...", "remember": true}
-                                                  -> enqueue speech; if remember,
+  {"voice": "...", "speed": 1.0, "text": "...", "remember": true,
+   "wait_done": false, "session": "..."?}         -> enqueue speech; if remember,
                                                      cache the rendered wav so it
-                                                     can be replayed instantly
-  {"stop": true}                                  -> stop NOW: kill current
-                                                     playback and drop the queue
-  {"replay": true}                                -> replay the cached wav with no
-                                                     re-synthesis (zero latency)
+                                                     can be replayed instantly. If
+                                                     wait_done, the ack is held
+                                                     back until the line has
+                                                     actually finished playing
+                                                     (not merely queued), so the
+                                                     caller learns when speech ends
+  {"stop": true, "session": "..."?}               -> stop NOW. With a session,
+                                                     only that session's lines are
+                                                     dropped (its own barge-in);
+                                                     without one it's global (the
+                                                     panic hotkey / shutdown)
+  {"replay": true}                                -> replay the line the history
+                                                     cursor points at (no re-synth)
+  {"history": "back"|"forward"}                   -> step the history cursor to an
+                                                     older/newer line and replay it
+  {"toggle_pause": true}                          -> pause or resume the line that
+                                                     is currently playing
+  {"warm": true}                                  -> no-op ack; used to spin the
+                                                     daemon up (and load the model)
+                                                     before the first spoken line
+
+A finished "proper" line (remember) is cached and pushed onto a small on-disk
+history ring, so replay and step-back survive a daemon idle-restart.
 Speak and replay requests also carry the volume/duck settings ("volume", "duck",
 "duck_ratio", "duck_hold") so config changes apply on the next line without a
 daemon restart.
+
+Each connection is handled on its own thread, so a wait_done ack that is parked
+waiting for playback never blocks a barge-in stop from being accepted.
 
 Playback runs on a background thread, so a stop request can interrupt speech
 that is already playing or still queued (barge-in). Single instance (flock);
@@ -33,17 +54,64 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections import namedtuple
 
 import kokoro_common as kc
 
 kc.find_espeak()
+
+# One unit of playback work. `session` is the submitting session id (None for
+# global replay); `gen` is that session's generation when queued, so a stop can
+# invalidate it. A per-session stop only drops items whose `session` matches.
+Item = namedtuple(
+    "Item", "session gen kind voice speed text remember settings done"
+)
 
 MODEL, VOICES = kc.model_paths()
 DATA = kc.data_dir()
 SOCK = os.path.join(DATA, "tts.sock")
 LOCK = os.path.join(DATA, "daemon.lock")
 LAST_WAV = os.path.join(DATA, "last.wav")  # cached audio of the last "proper" line
+SPEAKING = os.path.join(DATA, "speaking")  # present while audio is playing/queued
+HIST_DIR = os.path.join(DATA, "history")  # ring of recent lines, for repeat/back
+HIST_MAX = 12  # how many recent lines to keep replayable
 IDLE_TIMEOUT = 1800  # exit after 30 min with no requests
+
+
+def set_speaking(on):
+    """Maintain a marker file that exists while audio is playing or queued, so a
+    status line can show a 'speaking' indicator and a completion chime can hold
+    off (opt-in; see the README). Best-effort — never raises."""
+    try:
+        if on:
+            with open(SPEAKING, "w"):
+                pass
+        else:
+            os.unlink(SPEAKING)
+    except OSError:
+        pass
+
+
+def load_history():
+    """Recent-line wavs already on disk, oldest -> newest, so history (repeat /
+    step-back) survives a daemon idle-restart."""
+    try:
+        files = sorted(f for f in os.listdir(HIST_DIR) if f.endswith(".wav"))
+    except OSError:
+        return []
+    return [os.path.join(HIST_DIR, f) for f in files]
+
+
+def max_seq(paths):
+    """Highest numeric filename stem in the history dir, so new lines keep
+    counting up (monotonic, collision-free across restarts)."""
+    m = 0
+    for p in paths:
+        try:
+            m = max(m, int(os.path.splitext(os.path.basename(p))[0]))
+        except ValueError:
+            pass
+    return m
 
 
 class Ducker:
@@ -158,106 +226,270 @@ class Ducker:
 
 
 class Player:
-    """Serial speech player on a background thread, interruptible via stop()."""
+    """Serial speech player on a background thread.
+
+    One line plays at a time across all sessions — two voices at once would be
+    unintelligible — and each line is streamed sentence-by-sentence so first
+    audio is quick. Work is tagged with the submitting session, so a per-session
+    stop (a session's own barge-in) drops only that session's lines while other
+    sessions keep playing; a global stop (the panic hotkey / shutdown) clears
+    everything. Playback can be paused/resumed (SIGSTOP/SIGCONT on the live
+    afplay), and every finished "proper" line goes to a shared on-disk ring so it
+    can be replayed or stepped back to."""
 
     def __init__(self, kokoro):
         self.kokoro = kokoro
         self.q = queue.Queue()
         self.lock = threading.Lock()
-        self.current = None      # currently-playing afplay Popen
-        self.generation = 0      # bumped on stop() to invalidate in-flight work
+        self.current = None          # currently-playing afplay Popen
+        self.current_session = None  # which session `current` belongs to
+        self.paused = False          # is `current` SIGSTOPped?
+        self.generations = {}        # session -> generation; a stop bumps it
         self.ducker = Ducker()
+        self.history = load_history()      # recent line wavs, oldest -> newest
+        self.hist_seq = max_seq(self.history)
+        self.cursor = len(self.history) - 1  # which line repeat/step points at
         threading.Thread(target=self._run, daemon=True).start()
 
-    def submit(self, voice, speed, text, settings, remember=False):
-        with self.lock:
-            gen = self.generation
-        self.q.put((gen, "speak", voice, speed, text, remember, settings))
+    def _gen(self, session):
+        return self.generations.get(session, 0)
 
-    def replay(self, settings):
-        """Queue a replay of the cached wav (no synthesis)."""
+    def submit(self, session, voice, speed, text, settings, remember=False, done=None):
         with self.lock:
-            gen = self.generation
-        self.q.put((gen, "replay", None, None, None, False, settings))
+            gen = self._gen(session)
+        self.q.put(
+            Item(session, gen, "speak", voice, speed, text, remember, settings, done)
+        )
 
-    def stop(self):
+    def replay(self, path, settings, done=None):
+        """Queue a replay of a specific cached wav (no synthesis). Global — replay
+        is hotkey-driven and not tied to a session."""
         with self.lock:
-            self.generation += 1
+            gen = self._gen(None)
+        self.q.put(Item(None, gen, "replay", None, None, path, False, settings, done))
+
+    def replay_step(self, step, settings, done=None):
+        """Move the history cursor (step: 0 = current, -1 = older, +1 = newer)
+        and queue that line for replay. Returns False if there's no history."""
+        with self.lock:
+            if not self.history:
+                if done is not None:
+                    done.set()
+                return False
+            self.cursor = max(0, min(len(self.history) - 1, self.cursor + step))
+            path = self.history[self.cursor]
+        self.replay(path, settings, done)
+        return True
+
+    def toggle_pause(self):
+        """Pause or resume the line that's playing. Returns the new paused state
+        (False if nothing is playing to act on)."""
+        with self.lock:
+            if not (self.current and self.current.poll() is None):
+                return False
+            try:
+                if self.paused:
+                    os.kill(self.current.pid, signal.SIGCONT)
+                    self.paused = False
+                else:
+                    os.kill(self.current.pid, signal.SIGSTOP)
+                    self.paused = True
+            except OSError:
+                return False
+            return self.paused
+
+    def stop(self, session=None):
+        """Stop playback. session=None is a global stop (everything — the panic
+        hotkey and shutdown); a session id stops only that session's lines and
+        leaves any other session's audio playing."""
+        stopped_current = False
+        with self.lock:
+            if session is None:
+                for k in list(self.generations):
+                    self.generations[k] += 1
+                self.generations[None] = self._gen(None) + 1
+            else:
+                self.generations[session] = self._gen(session) + 1
+            # Drain the queue: drop the items this stop targets (releasing any
+            # wait-until-spoken caller), keep the rest and put them back.
+            kept = []
             while True:
                 try:
-                    self.q.get_nowait()
+                    item = self.q.get_nowait()
                 except queue.Empty:
                     break
-            if self.current and self.current.poll() is None:
+                if session is None or item.session == session:
+                    if item.done is not None:
+                        item.done.set()
+                else:
+                    kept.append(item)
+            for item in kept:
+                self.q.put(item)
+            # Terminate current playback only if this stop targets it.
+            if (
+                self.current
+                and self.current.poll() is None
+                and (session is None or self.current_session == session)
+            ):
+                # A SIGSTOPped process ignores SIGTERM until continued — wake it
+                # first so the terminate actually lands.
+                if self.paused:
+                    try:
+                        os.kill(self.current.pid, signal.SIGCONT)
+                    except OSError:
+                        pass
                 self.current.terminate()
-        # Barge-in / shutdown: give the user their volume back right away.
-        self.ducker.restore_now()
+                self.paused = False
+                stopped_current = True
+        # Only hand audio/ducking back if we actually stopped what was playing —
+        # a per-session stop that didn't touch the current line leaves it be.
+        if stopped_current:
+            self.ducker.restore_now()
+            set_speaking(False)
 
-    def _stale(self, gen):
+    def _stale(self, session, gen):
         with self.lock:
-            return gen != self.generation
+            return gen != self._gen(session)
+
+    def _remember(self, audio, sr):
+        """Cache a finished line: write the newest-line wav and push a copy into
+        the on-disk history ring, pruning the oldest past HIST_MAX. Resets the
+        cursor to the newest line."""
+        import soundfile as sf
+
+        with self.lock:
+            self.hist_seq += 1
+            seq = self.hist_seq
+        path = os.path.join(HIST_DIR, f"{seq:06d}.wav")
+        try:
+            os.makedirs(HIST_DIR, exist_ok=True)
+            sf.write(path, audio, sr)
+            shutil.copyfile(path, LAST_WAV)
+        except OSError:
+            return
+        with self.lock:
+            self.history.append(path)
+            while len(self.history) > HIST_MAX:
+                old = self.history.pop(0)
+                try:
+                    os.unlink(old)
+                except OSError:
+                    pass
+            self.cursor = len(self.history) - 1
+
+    def _play(self, item, wav_path, audio):
+        """Play one wav via afplay, registered as `current` so stop/pause can
+        reach it. Returns False if superseded before it could start."""
+        gain = min(kc.gain_from_volume(item.settings["volume"]), kc.clip_ceiling(audio))
+        with self.lock:
+            if item.gen != self._gen(item.session):
+                return False
+            set_speaking(True)
+            self.current_session = item.session
+            self.current = subprocess.Popen(["afplay", "-v", f"{gain:.3f}", wav_path])
+        self.current.wait()
+        return True
 
     def _run(self):
+        while True:
+            item = self.q.get()
+            try:
+                if self._stale(item.session, item.gen):
+                    continue
+                try:
+                    if item.kind == "replay":
+                        self._play_replay(item)
+                    else:
+                        self._play_streaming(item)
+                except Exception:
+                    pass
+                finally:
+                    self.ducker.end(item.settings)
+                    if self.q.empty():
+                        set_speaking(False)
+            finally:
+                # Always release a wait-until-spoken caller, however this line
+                # ended — played, dropped as stale, or errored.
+                if item.done is not None:
+                    item.done.set()
+
+    def _play_replay(self, item):
+        out = item.text or LAST_WAV
+        if not out or not os.path.exists(out):
+            return
+        self.ducker.begin(item.settings)
+        self._play(item, out, None)  # audio=None -> conservative gain cap
+
+    def _play_streaming(self, item):
+        """Synthesize sentence-by-sentence and play each as soon as it's ready,
+        synthesizing the NEXT sentence while the current one plays. First audio
+        lands after just the first sentence; there's no full-line wait."""
         import numpy as np
         import soundfile as sf
 
-        while True:
-            gen, kind, voice, speed, text, remember, settings = self.q.get()
-            if self._stale(gen):
-                continue
-            out = None
-            delete_after = False
-            audio = None
-            try:
-                if kind == "replay":
-                    # No synthesis: just play the cached wav, and don't delete it.
-                    if not os.path.exists(LAST_WAV):
-                        continue
-                    out, delete_after = LAST_WAV, False
-                else:
-                    parts, sr = [], 24000
-                    for piece in kc.chunk(text):
-                        if self._stale(gen):
-                            break
-                        samples, sr = self.kokoro.create(
-                            piece, voice=voice, speed=speed, lang="en-us"
-                        )
-                        parts.append(samples)
-                        parts.append(np.zeros(int(sr * 0.12), dtype=samples.dtype))
-                    if self._stale(gen) or not parts:
-                        continue
-                    audio = np.concatenate(parts)
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                        out = f.name
-                    sf.write(out, audio, sr)
-                    delete_after = True
-                # Claude's own loudness (independent of the system volume, never
-                # ducked); duck the other apps in parallel.
-                gain = min(kc.gain_from_volume(settings["volume"]), kc.clip_ceiling(audio))
+        session, gen, settings = item.session, item.gen, item.settings
+        pieces = kc.stream_pieces(item.text)
+        if self._stale(session, gen) or not pieces:
+            return
+
+        def synth(piece):
+            samples, sr = self.kokoro.create(
+                piece, voice=item.voice, speed=item.speed, lang="en-us"
+            )
+            seg = np.concatenate(
+                [samples, np.zeros(int(sr * 0.1), dtype=samples.dtype)]
+            )
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                out = f.name
+            sf.write(out, seg, sr)
+            return out, seg, sr
+
+        collected, sr = [], 24000
+        began = False
+        nxt = synth(pieces[0])  # the only pre-audio wait
+        for i in range(len(pieces)):
+            if nxt is None:
+                break
+            path, seg, sr = nxt
+            gain = min(kc.gain_from_volume(settings["volume"]), kc.clip_ceiling(seg))
+            if not began:
                 self.ducker.begin(settings)
-                with self.lock:
-                    if gen != self.generation:
-                        continue
-                    self.current = subprocess.Popen(
-                        ["afplay", "-v", f"{gain:.3f}", out]
-                    )
-                # Cache this line's audio so a later replay skips synthesis. Safe
-                # to copy while afplay reads `out` (read-only source).
-                if remember:
-                    try:
-                        shutil.copyfile(out, LAST_WAV)
-                    except OSError:
-                        pass
-                self.current.wait()
-            except Exception:
-                pass
-            finally:
-                self.ducker.end(settings)
-                if delete_after and out:
-                    try:
-                        os.unlink(out)
-                    except OSError:
-                        pass
+                began = True
+            with self.lock:
+                if gen != self._gen(session):
+                    self._unlink(path)
+                    break
+                collected.append(seg)
+                set_speaking(True)
+                self.current_session = session
+                self.current = subprocess.Popen(["afplay", "-v", f"{gain:.3f}", path])
+                proc = self.current
+            # Synthesize the NEXT sentence while THIS one is playing, so there's
+            # no gap between sentences and only the first sentence costs latency.
+            nxt = None
+            if i + 1 < len(pieces) and not self._stale(session, gen):
+                try:
+                    nxt = synth(pieces[i + 1])
+                except Exception:
+                    nxt = None
+            proc.wait()
+            self._unlink(path)
+            if self._stale(session, gen):
+                if nxt is not None:
+                    self._unlink(nxt[0])
+                    nxt = None
+                break
+
+        # Cache the full line for repeat / history, but only if it played in full.
+        if item.remember and len(collected) == len(pieces) and not self._stale(session, gen):
+            self._remember(np.concatenate(collected), sr)
+
+    @staticmethod
+    def _unlink(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _reply(conn, msg):
@@ -305,10 +537,18 @@ def main():
 
     from kokoro_onnx import Kokoro
 
-    # A prior daemon killed mid-duck may have left the volume low — put it back.
+    # A prior daemon killed mid-duck may have left the volume low — put it back,
+    # and clear any stale "speaking" marker a hard kill left behind.
     kc.recover_duck()
+    set_speaking(False)
 
     player = Player(Kokoro(MODEL, VOICES))
+    # Prime the phonemizer + ONNX graph with one throwaway synth so the FIRST
+    # real spoken line pays synthesis time, not one-time init on top of it.
+    try:
+        player.kokoro.create("Ready.", voice="af_heart", speed=1.0, lang="en-us")
+    except Exception:
+        pass
     # Kill any in-flight playback (and restore the volume) on shutdown so a line
     # doesn't outlive the daemon and the user gets their volume back.
     atexit.register(player.stop)
@@ -319,17 +559,7 @@ def main():
     except FileNotFoundError:
         pass
 
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(SOCK)
-    srv.listen(8)
-    srv.settimeout(IDLE_TIMEOUT)
-
-    while True:
-        try:
-            conn, _ = srv.accept()
-        except socket.timeout:
-            break  # idle -> exit and free RAM
-
+    def handle(conn):
         with conn:
             conn.settimeout(15)
             data = b""
@@ -348,18 +578,35 @@ def main():
                 req = {}
 
             if req.get("stop"):
-                player.stop()
+                # A "session" scopes the stop to that session's own lines; without
+                # one it's a global stop (panic hotkey / shutdown).
+                player.stop(req.get("session"))
                 _reply(conn, b"OK\n")
-                continue
+                return
 
-            if req.get("replay"):
-                # NONE lets the client fall back to re-synthesis from saved text.
-                if os.path.exists(LAST_WAV):
-                    player.replay(_settings(req))
+            # Warm-up: reaching this handler means the daemon is up and the model
+            # is already loaded, so just ack — the first spoken line will be fast.
+            if req.get("warm"):
+                _reply(conn, b"OK\n")
+                return
+
+            # Pause / resume the line that's playing (toggle).
+            if req.get("toggle_pause"):
+                paused = player.toggle_pause()
+                _reply(conn, b"PAUSED\n" if paused else b"OK\n")
+                return
+
+            # Replay: "history" steps the cursor (back/forward) through recent
+            # lines; a plain replay repeats the line the cursor points at. NONE
+            # lets the client fall back to re-synthesis from saved text.
+            nav = req.get("history")
+            if req.get("replay") or nav:
+                step = {"back": -1, "forward": 1}.get(nav, 0)
+                if player.replay_step(step, _settings(req)):
                     _reply(conn, b"OK\n")
                 else:
                     _reply(conn, b"NONE\n")
-                continue
+                return
 
             text = (req.get("text") or "").strip()
             voice = req.get("voice") or "af_heart"
@@ -370,12 +617,40 @@ def main():
 
             if not text:
                 _reply(conn, b"EMPTY\n")
-                continue
+                return
 
+            # wait_done: hold the connection open and ack only after this line has
+            # actually finished playing (not merely queued), so the caller's turn
+            # ends when the audio does. On its own thread, so a barge-in stop is
+            # still accepted and unblocks us.
+            done = threading.Event() if req.get("wait_done") else None
             player.submit(
-                voice, speed, text, _settings(req), remember=bool(req.get("remember"))
+                req.get("session"),
+                voice,
+                speed,
+                text,
+                _settings(req),
+                remember=bool(req.get("remember")),
+                done=done,
             )
-            _reply(conn, b"OK\n")
+            if done is not None:
+                conn.settimeout(None)
+                done.wait(timeout=300)
+                _reply(conn, b"DONE\n")
+            else:
+                _reply(conn, b"OK\n")
+
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(SOCK)
+    srv.listen(8)
+    srv.settimeout(IDLE_TIMEOUT)
+
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except socket.timeout:
+            break  # idle -> exit and free RAM
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
 
     try:
         os.unlink(SOCK)

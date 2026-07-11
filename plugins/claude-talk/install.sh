@@ -51,7 +51,7 @@ if [ -t 0 ] && [ "${1:-}" != "--skip-config" ]; then
   step "Choose your voice and speed"
   "$DATA/venv/bin/python" "$DATA/bin/setup.py" || true
 else
-  [ -f "$DATA/config.env" ] || printf 'KOKORO_VOICE=af_heart\nKOKORO_SPEED=1.0\nCLAUDE_TALK_NAME=""\nCLAUDE_TALK_VOLUME=100\nCLAUDE_TALK_DUCK=on\n' > "$DATA/config.env"
+  [ -f "$DATA/config.env" ] || printf 'KOKORO_VOICE=af_heart\nKOKORO_SPEED=1.0\nCLAUDE_TALK_NAME=""\nCLAUDE_TALK_VOLUME=100\nCLAUDE_TALK_DUCK=on\nCLAUDE_TALK_SESSION_VOICE=distinct\n' > "$DATA/config.env"
 fi
 
 step "Done"
@@ -66,7 +66,7 @@ claude-talk is installed.
 The first time you run /talk, Claude Code will ask permission to run the
 claude-talk command — choose "Yes, and don't ask again" to allow it.
 
-Optional: bind global "stop" and "repeat" hotkeys (requires skhd). This is
-opt-in and not set up for you — see the "Hotkeys" section of the README:
-https://github.com/lpicci96/claude-plugins/tree/main/plugins/claude-talk#hotkeys-optional-opt-in-stop-and-repeat
+Optional: bind global stop / pause / repeat / step-back hotkeys (requires skhd).
+This is opt-in and not set up for you — see the "Hotkeys" section of the README:
+https://github.com/lpicci96/claude-plugins/tree/main/plugins/claude-talk#hotkeys-optional-opt-in-stop-pause-repeat-step-backforward
 EOF
