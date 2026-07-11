@@ -13,6 +13,12 @@ The speak command is:
 
 If `~/.claude/claude-talk/venv` does not exist, claude-talk isn't installed yet. Say so in text (don't attempt to speak): tell the user to run the installer once — `bash <plugin dir>/install.sh` (it sets up a local voice model, ~340 MB) — and offer to continue meanwhile with the basic macOS `say` voice if they like.
 
+## Turn the mode on (do this first)
+
+Before your first spoken line, run this once — it marks the session as being in voice mode (so you get a per-turn reminder to keep speaking) and warms the voice engine so your first line isn't slow:
+
+    ~/.claude/claude-talk/bin/talk.sh --on
+
 ## How to reply
 
 - **Speak, don't also write a parallel essay.** The spoken reply IS the response. Written output exists only for what the user must SEE — code, links, numbers, options — as terse notes, never a conversational message. Most turns should show nothing on screen.
@@ -34,9 +40,11 @@ The goal isn't more interim chatter — it's not going quiet at the moments that
 
 ## End with a spoken wrap-up
 
-    ~/.claude/claude-talk/bin/talk.sh "<wrap-up>"
+Speak the wrap-up with `KOKORO_WAIT_DONE=1`. That makes the command block until the line has *actually finished playing*, so your turn ends when the audio ends — not before it (otherwise the prompt looks done while the voice is still catching up):
 
-Long enough to cover what matters, no longer — this is the spoken summary, not the full record.
+    KOKORO_WAIT_DONE=1 ~/.claude/claude-talk/bin/talk.sh "<wrap-up>"
+
+Long enough to cover what matters, no longer — this is the spoken summary, not the full record. (Use `KOKORO_WAIT_DONE=1` only for this final line; interim narration stays non-blocking with `KOKORO_NOWAIT=1` so it never slows the work.)
 
 The **text notes** at the end are where completeness lives: don't let anything load-bearing exist only as audio the user might have missed. Once the spoken wrap-up is done, write terse text notes covering everything they'd need if they weren't listening closely — links, exact file paths, commands run, PR/branch names, follow-ups. Keep it scannable, not a transcript of what you just said.
 
@@ -46,7 +54,11 @@ Conversational — a chat, not a briefing. React naturally, ask a question back 
 
 ## Ending
 
-Stay in this mode until the user says "stop talking" / "quiet" / "we're done", runs `/quiet`, or starts a new session. Then stop speaking and confirm in text.
+Stay in this mode until the user says "stop talking" / "quiet" / "we're done", runs `/quiet`, or starts a new session. When you leave voice mode this way (not via `/quiet`, which does it for you), clear the mode mark so the per-turn reminder stops:
+
+    ~/.claude/claude-talk/bin/talk.sh --off
+
+Then stop speaking and confirm in text.
 
 ## Starting
 

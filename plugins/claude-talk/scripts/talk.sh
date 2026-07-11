@@ -5,12 +5,29 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$DIR/common.sh"
 
+SID="${CLAUDE_CODE_SESSION_ID:-nosession}"
+
+# Mode control (not speech): `--on` (run by /talk) marks this session as being in
+# conversation mode — so the UserPromptSubmit hook can remind Claude to keep
+# speaking — and warms the daemon so the first spoken line isn't slow. `--off`
+# (run by /quiet) clears the mark. Old marks are tidied after a day.
+case "${1-}" in
+  --on)
+    touch "$CLAUDE_TALK_HOME/talk-mode-$SID" 2>/dev/null
+    find "$CLAUDE_TALK_HOME" -maxdepth 1 -name 'talk-mode-*' -mtime +1 -delete 2>/dev/null
+    [ -x "$VENV_PY" ] && [ -f "$DIR/client.py" ] && "$VENV_PY" "$DIR/client.py" --warm 2>/dev/null
+    exit 0 ;;
+  --off)
+    rm -f "$CLAUDE_TALK_HOME/talk-mode-$SID" 2>/dev/null
+    exit 0 ;;
+esac
+
 TEXT="$*"
 [ -z "$TEXT" ] && TEXT="$(cat)"
 
-# Robustness: the interim flag belongs *before* the command as an env var
-# (`KOKORO_NOWAIT=1 talk.sh "…"`). If it lands as a trailing argument instead,
-# honor it as the flag rather than reading "KOKORO_NOWAIT=1" aloud.
+# Robustness: the interim / wait-done flags belong *before* the command as an env
+# var (`KOKORO_NOWAIT=1 talk.sh "…"`). If one lands as a trailing argument
+# instead, honor it as the flag rather than reading "KOKORO_NOWAIT=1" aloud.
 tail_tok="${TEXT##* }"
 case "$tail_tok" in
   KOKORO_NOWAIT=*)
@@ -18,6 +35,13 @@ case "$tail_tok" in
     case "$TEXT" in
       *" "*) TEXT="${TEXT% *}" ;;  # drop the trailing token
       *)     TEXT="" ;;            # it was the only token
+    esac
+    ;;
+  KOKORO_WAIT_DONE=*)
+    export KOKORO_WAIT_DONE="${tail_tok#KOKORO_WAIT_DONE=}"
+    case "$TEXT" in
+      *" "*) TEXT="${TEXT% *}" ;;
+      *)     TEXT="" ;;
     esac
     ;;
 esac
@@ -33,8 +57,12 @@ esac
 # can silence it while claude-talk is speaking (opt-in; see the README
 # "Completion chime" section). Harmless for everyone else. Also tidy markers
 # older than a day.
-touch "$CLAUDE_TALK_HOME/spoke-${CLAUDE_CODE_SESSION_ID:-nosession}" 2>/dev/null
+touch "$CLAUDE_TALK_HOME/spoke-$SID" 2>/dev/null
 find "$CLAUDE_TALK_HOME" -maxdepth 1 -name 'spoke-*' -mtime +1 -delete 2>/dev/null
+
+# Keep the talk-mode mark fresh while we're actively speaking, so the day-old
+# cleanup never clears an in-use session (but don't create it — that's --on's job).
+[ -f "$CLAUDE_TALK_HOME/talk-mode-$SID" ] && touch "$CLAUDE_TALK_HOME/talk-mode-$SID" 2>/dev/null
 
 if [ -x "$VENV_PY" ]; then
   # Fast path: persistent daemon (keeps the model loaded).

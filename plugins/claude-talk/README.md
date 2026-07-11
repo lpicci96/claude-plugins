@@ -36,18 +36,21 @@ The first time you run `/talk`, Claude Code asks permission to run the claude-ta
 
 You can also say "stop talking" to exit. Interrupt anytime — sending a new message stops whatever is playing.
 
-### Hotkeys (optional, opt-in): stop and repeat
+### Hotkeys (optional, opt-in): stop, pause, repeat, step back/forward
 
 **These are entirely optional — the plugin does not install them, and everything above works without them.** If you want them, you set them up yourself once.
 
-Sending a message already stops playback, but you can't do that when Claude is idle at the end of a turn. For a true "shut up now" button — and a "say that again" button that costs **zero tokens** — bind two global hotkeys with [`skhd`](https://github.com/koekeishiya/skhd):
+Sending a message already stops playback, but you can't do that when Claude is idle at the end of a turn. For a true "shut up now" button, a **pause** toggle, and **repeat / step-back** buttons that cost **zero tokens**, bind global hotkeys with [`skhd`](https://github.com/koekeishiya/skhd):
 
 ```bash
 brew install koekeishiya/formulae/skhd
 mkdir -p ~/.config/skhd
 cat >> ~/.config/skhd/skhdrc <<'EOF'
-alt - escape : ~/.claude/claude-talk/bin/stop.sh    # stop speaking now
-alt - r      : ~/.claude/claude-talk/bin/repeat.sh  # replay the last line
+alt - escape : ~/.claude/claude-talk/bin/stop.sh     # stop speaking now
+alt - space  : ~/.claude/claude-talk/bin/pause.sh    # pause / resume (toggle)
+alt - r      : ~/.claude/claude-talk/bin/repeat.sh   # replay the current line
+alt - 0x21   : ~/.claude/claude-talk/bin/back.sh     # alt-[  : older line
+alt - 0x1E   : ~/.claude/claude-talk/bin/forward.sh  # alt-]  : newer line
 EOF
 skhd --start-service
 ```
@@ -55,9 +58,11 @@ skhd --start-service
 Then grant **skhd** Accessibility permission (System Settings → Privacy & Security → Accessibility) and restart it with `skhd --restart-service`.
 
 - **Stop** kills playback and drops the queue instantly, from anywhere — even mid-turn or when Claude is idle.
-- **Repeat** replays the last full line Claude spoke, with no LLM turn. The daemon caches that line's rendered audio, so repeat replays the file directly (near-instant, no re-synthesis); if the cache isn't warm it falls back to re-synthesizing from the saved text. Interim narration is skipped, so repeat replays the real reply. The cache is shared across sessions, so repeat always replays the most recent thing said by any talk session.
+- **Pause** freezes the line that's playing and resumes it exactly where it left off (a real pause of the audio process, not a mute). Press again to resume.
+- **Repeat** replays the line the history cursor points at, with no LLM turn. The daemon caches each line's rendered audio, so repeat plays the file directly (near-instant, no re-synthesis); if the cache isn't warm it falls back to re-synthesizing from saved text. Interim narration is skipped, so repeat replays real replies.
+- **Back / forward** step the cursor through the last few full lines Claude spoke (up to a dozen), so you can replay an *earlier* message, not just the most recent one. Any new spoken line snaps the cursor back to newest.
 
-These use the **Option** modifier (`alt`) on purpose: `skhd` captures whatever combo you bind _globally_, so a `cmd`-based one would shadow app shortcuts everywhere it runs (e.g. `cmd - r` would swallow browser/Finder reload). Pick any keys you like, but avoid ones you rely on elsewhere.
+These use the **Option** modifier (`alt`) on purpose: `skhd` captures whatever combo you bind _globally_, so a `cmd`-based one would shadow app shortcuts everywhere it runs (e.g. `cmd - r` would swallow browser/Finder reload). Pick any keys you like, but avoid ones you rely on elsewhere. (`0x21`/`0x1E` are the `[` and `]` keycodes.)
 
 ### Completion chime (optional): stay silent while Claude talks
 
@@ -82,10 +87,33 @@ afplay /System/Library/Sounds/Glass.aiff
 Markers older than a day are cleaned up automatically. If you don't use a chime
 hook, the marker is harmless and you can ignore all of this.
 
+### Status line (optional): see when Claude is speaking
+
+While audio is playing or queued, the daemon keeps a marker file at:
+
+```
+~/.claude/claude-talk/speaking
+```
+
+It exists exactly while there's sound to play and is removed the moment the queue
+drains — so you can show a "speaking" indicator and tell the difference between
+_Claude is still talking_ and _Claude is done_. Drop this into a status line:
+
+```bash
+[ -e "$HOME/.claude/claude-talk/speaking" ] && printf '🔊 speaking'
+```
+
+(The spoken wrap-up already blocks until the audio finishes, so a completed turn
+means the voice is done; this marker is for spotting playback that's still going
+_within_ a turn — e.g. queued interim narration.)
+
 ## How it works
 
 - **Engine:** [Kokoro-82M](https://github.com/hexgrad/kokoro) via [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx), run locally. 28 voices, US & UK, no API key.
-- **Low latency:** a small background daemon keeps the model loaded, so replies start in ~1–2 s. It idles out after 30 minutes to free memory.
+- **Low latency:** a small background daemon keeps the model loaded, and each reply is **streamed** — the first sentence starts playing while the rest is still being synthesized, so audio starts in about a second even for a long reply. It idles out after 30 minutes to free memory.
+- **Warm start:** running `/talk` spins the voice engine up right away, so your first spoken line isn't the slow one.
+- **Knows when it's done:** the spoken wrap-up blocks until the audio has actually finished, so Claude's turn ends when the voice does — not with the voice still trailing after the prompt looks finished.
+- **Stays in voice:** while `/talk` is on, a per-turn nudge keeps Claude speaking and narrating its work, instead of quietly drifting back to text mid-session.
 - **Barge-in:** a `UserPromptSubmit` hook stops playback the moment you send your next message.
 - **Never breaks:** if the daemon or model is unavailable, it falls back to one-shot synthesis, then to macOS `say`.
 

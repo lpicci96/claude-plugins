@@ -269,3 +269,29 @@ def chunk(text):
     if cur:
         chunks.append(cur)
     return chunks or [text]
+
+
+def stream_pieces(text):
+    """Split text into small, playable pieces — roughly one sentence each — so
+    streaming playback can start the first piece while the rest still synthesizes.
+    A sentence longer than MAX_CHARS is broken on commas, then hard-wrapped by
+    length, so time-to-first-audio stays small even for a long opening sentence."""
+    pieces = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text.strip()):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(sentence) <= MAX_CHARS:
+            pieces.append(sentence)
+            continue
+        cur = ""
+        for part in re.split(r"(?<=,)\s+", sentence):
+            if len(cur) + len(part) + 1 <= MAX_CHARS:
+                cur = (cur + " " + part).strip()
+            else:
+                if cur:
+                    pieces.append(cur)
+                cur = part
+        if cur:
+            pieces.append(cur)
+    return pieces or [text.strip()]

@@ -66,7 +66,7 @@ claude-talk is installed.
 The first time you run /talk, Claude Code will ask permission to run the
 claude-talk command — choose "Yes, and don't ask again" to allow it.
 
-Optional: bind global "stop" and "repeat" hotkeys (requires skhd). This is
-opt-in and not set up for you — see the "Hotkeys" section of the README:
-https://github.com/lpicci96/claude-plugins/tree/main/plugins/claude-talk#hotkeys-optional-opt-in-stop-and-repeat
+Optional: bind global stop / pause / repeat / step-back hotkeys (requires skhd).
+This is opt-in and not set up for you — see the "Hotkeys" section of the README:
+https://github.com/lpicci96/claude-plugins/tree/main/plugins/claude-talk#hotkeys-optional-opt-in-stop-pause-repeat-step-backforward
 EOF
