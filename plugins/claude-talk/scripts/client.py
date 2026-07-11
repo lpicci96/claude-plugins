@@ -52,13 +52,18 @@ def start_daemon():
     )
 
 
-def send_stop():
+def send_stop(session=None):
+    """Barge-in stop. With a session, only that session's lines stop (its own
+    prompt-submit); without one it's a global stop (the panic hotkey)."""
     try:
         s = connect()
     except OSError:
         return 0  # no daemon -> nothing to stop
+    req = {"stop": True}
+    if session:
+        req["session"] = session
     try:
-        s.sendall(json.dumps({"stop": True}).encode("utf-8"))
+        s.sendall(json.dumps(req).encode("utf-8"))
         s.shutdown(socket.SHUT_WR)
         s.recv(16)
     except OSError:
@@ -140,7 +145,7 @@ def send_pause():
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--stop":
-        return send_stop()
+        return send_stop(sys.argv[2] if len(sys.argv) > 2 else None)
     if len(sys.argv) > 1 and sys.argv[1] == "--warm":
         return send_warm()
     if len(sys.argv) > 1 and sys.argv[1] == "--replay":
@@ -167,6 +172,9 @@ def main():
             # spoken wrap-up so the turn ends when the audio does).
             "wait_done": bool(os.environ.get("KOKORO_WAIT_DONE"))
             and not os.environ.get("KOKORO_NOWAIT"),
+            # Which session this line belongs to, so a per-session barge-in stop
+            # only drops this session's lines (multi-session isolation).
+            "session": os.environ.get("CLAUDE_CODE_SESSION_ID") or None,
             **settings(),
         }
     ).encode("utf-8")

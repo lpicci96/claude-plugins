@@ -15,9 +15,16 @@ If `~/.claude/claude-talk/venv` does not exist, claude-talk isn't installed yet.
 
 ## Turn the mode on (do this first)
 
-Before your first spoken line, run this once — it marks the session as being in voice mode (so you get a per-turn reminder to keep speaking) and warms the voice engine so your first line isn't slow:
+Before your first spoken line, run this once — it marks the session as being in voice mode (so you get a per-turn reminder to keep speaking), picks this session's voice, and warms the voice engine so your first line isn't slow:
 
     ~/.claude/claude-talk/bin/talk.sh --on
+
+**Voice parameter:** if the first word of the command arguments is exactly `same` or `different`, it controls this session's voice and is **not** part of the topic:
+
+- `different` → this session takes a distinct voice, so if another `/talk` session is running they don't sound alike. Run `~/.claude/claude-talk/bin/talk.sh --on different`.
+- `same` → use the configured voice even if another session is active. Run `~/.claude/claude-talk/bin/talk.sh --on same`.
+
+With no such keyword, just run `~/.claude/claude-talk/bin/talk.sh --on` (it follows the `CLAUDE_TALK_SESSION_VOICE` default from config, which is `distinct`). Everything after an optional `same`/`different` keyword is the opening topic.
 
 ## How to reply
 
@@ -62,4 +69,4 @@ Then stop speaking and confirm in text.
 
 ## Starting
 
-If arguments are provided, that's the opening topic — respond and speak it. Otherwise greet briefly out loud and ask what's on their mind.
+If arguments are provided (after any leading `same`/`different` voice keyword), that's the opening topic — respond and speak it. Otherwise greet briefly out loud and ask what's on their mind.

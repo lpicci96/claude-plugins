@@ -12,8 +12,9 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 payload="$(cat 2>/dev/null)"
 sid="$(printf '%s' "$payload" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 
-# 1. Barge-in stop.
-[ -x "$VENV_PY" ] && [ -f "$DIR/client.py" ] && "$VENV_PY" "$DIR/client.py" --stop 2>/dev/null
+# 1. Barge-in stop, scoped to THIS session — sending a prompt here stops only
+# this session's audio, never another session that happens to be speaking.
+[ -x "$VENV_PY" ] && [ -f "$DIR/client.py" ] && "$VENV_PY" "$DIR/client.py" --stop "$sid" 2>/dev/null
 
 # 2. Talk-mode reminder (only while this session has an active mark).
 if [ -n "$sid" ] && [ -f "$CLAUDE_TALK_HOME/talk-mode-$sid" ]; then

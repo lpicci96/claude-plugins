@@ -3,7 +3,7 @@
 
 Loads the model once and stays resident on a Unix socket. Requests are JSON:
   {"voice": "...", "speed": 1.0, "text": "...", "remember": true,
-   "wait_done": false}                            -> enqueue speech; if remember,
+   "wait_done": false, "session": "..."?}         -> enqueue speech; if remember,
                                                      cache the rendered wav so it
                                                      can be replayed instantly. If
                                                      wait_done, the ack is held
@@ -11,8 +11,11 @@ Loads the model once and stays resident on a Unix socket. Requests are JSON:
                                                      actually finished playing
                                                      (not merely queued), so the
                                                      caller learns when speech ends
-  {"stop": true}                                  -> stop NOW: kill current
-                                                     playback and drop the queue
+  {"stop": true, "session": "..."?}               -> stop NOW. With a session,
+                                                     only that session's lines are
+                                                     dropped (its own barge-in);
+                                                     without one it's global (the
+                                                     panic hotkey / shutdown)
   {"replay": true}                                -> replay the line the history
                                                      cursor points at (no re-synth)
   {"history": "back"|"forward"}                   -> step the history cursor to an
@@ -51,10 +54,18 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections import namedtuple
 
 import kokoro_common as kc
 
 kc.find_espeak()
+
+# One unit of playback work. `session` is the submitting session id (None for
+# global replay); `gen` is that session's generation when queued, so a stop can
+# invalidate it. A per-session stop only drops items whose `session` matches.
+Item = namedtuple(
+    "Item", "session gen kind voice speed text remember settings done"
+)
 
 MODEL, VOICES = kc.model_paths()
 DATA = kc.data_dir()
@@ -215,37 +226,47 @@ class Ducker:
 
 
 class Player:
-    """Serial speech player on a background thread, interruptible via stop().
+    """Serial speech player on a background thread.
 
-    A spoken line is streamed: the first sentence is synthesized and starts
-    playing while the rest synthesizes behind it, so time-to-first-audio is just
-    the first sentence — not the whole line. Playback can be paused/resumed
-    (SIGSTOP/SIGCONT on the live afplay), and every finished "proper" line is
-    cached to a small on-disk ring so it can be replayed or stepped back to."""
+    One line plays at a time across all sessions — two voices at once would be
+    unintelligible — and each line is streamed sentence-by-sentence so first
+    audio is quick. Work is tagged with the submitting session, so a per-session
+    stop (a session's own barge-in) drops only that session's lines while other
+    sessions keep playing; a global stop (the panic hotkey / shutdown) clears
+    everything. Playback can be paused/resumed (SIGSTOP/SIGCONT on the live
+    afplay), and every finished "proper" line goes to a shared on-disk ring so it
+    can be replayed or stepped back to."""
 
     def __init__(self, kokoro):
         self.kokoro = kokoro
         self.q = queue.Queue()
         self.lock = threading.Lock()
-        self.current = None      # currently-playing afplay Popen
-        self.paused = False      # is `current` SIGSTOPped?
-        self.generation = 0      # bumped on stop() to invalidate in-flight work
+        self.current = None          # currently-playing afplay Popen
+        self.current_session = None  # which session `current` belongs to
+        self.paused = False          # is `current` SIGSTOPped?
+        self.generations = {}        # session -> generation; a stop bumps it
         self.ducker = Ducker()
         self.history = load_history()      # recent line wavs, oldest -> newest
         self.hist_seq = max_seq(self.history)
         self.cursor = len(self.history) - 1  # which line repeat/step points at
         threading.Thread(target=self._run, daemon=True).start()
 
-    def submit(self, voice, speed, text, settings, remember=False, done=None):
+    def _gen(self, session):
+        return self.generations.get(session, 0)
+
+    def submit(self, session, voice, speed, text, settings, remember=False, done=None):
         with self.lock:
-            gen = self.generation
-        self.q.put((gen, "speak", voice, speed, text, remember, settings, done))
+            gen = self._gen(session)
+        self.q.put(
+            Item(session, gen, "speak", voice, speed, text, remember, settings, done)
+        )
 
     def replay(self, path, settings, done=None):
-        """Queue a replay of a specific cached wav (no synthesis)."""
+        """Queue a replay of a specific cached wav (no synthesis). Global — replay
+        is hotkey-driven and not tied to a session."""
         with self.lock:
-            gen = self.generation
-        self.q.put((gen, "replay", None, None, path, False, settings, done))
+            gen = self._gen(None)
+        self.q.put(Item(None, gen, "replay", None, None, path, False, settings, done))
 
     def replay_step(self, step, settings, done=None):
         """Move the history cursor (step: 0 = current, -1 = older, +1 = newer)
@@ -277,18 +298,39 @@ class Player:
                 return False
             return self.paused
 
-    def stop(self):
+    def stop(self, session=None):
+        """Stop playback. session=None is a global stop (everything — the panic
+        hotkey and shutdown); a session id stops only that session's lines and
+        leaves any other session's audio playing."""
+        stopped_current = False
         with self.lock:
-            self.generation += 1
+            if session is None:
+                for k in list(self.generations):
+                    self.generations[k] += 1
+                self.generations[None] = self._gen(None) + 1
+            else:
+                self.generations[session] = self._gen(session) + 1
+            # Drain the queue: drop the items this stop targets (releasing any
+            # wait-until-spoken caller), keep the rest and put them back.
+            kept = []
             while True:
                 try:
                     item = self.q.get_nowait()
                 except queue.Empty:
                     break
-                # Unblock any wait-until-spoken caller whose line we just dropped.
-                if item[7] is not None:
-                    item[7].set()
-            if self.current and self.current.poll() is None:
+                if session is None or item.session == session:
+                    if item.done is not None:
+                        item.done.set()
+                else:
+                    kept.append(item)
+            for item in kept:
+                self.q.put(item)
+            # Terminate current playback only if this stop targets it.
+            if (
+                self.current
+                and self.current.poll() is None
+                and (session is None or self.current_session == session)
+            ):
                 # A SIGSTOPped process ignores SIGTERM until continued — wake it
                 # first so the terminate actually lands.
                 if self.paused:
@@ -297,14 +339,17 @@ class Player:
                     except OSError:
                         pass
                 self.current.terminate()
-            self.paused = False
-        # Barge-in / shutdown: give the user their volume back right away.
-        self.ducker.restore_now()
-        set_speaking(False)
+                self.paused = False
+                stopped_current = True
+        # Only hand audio/ducking back if we actually stopped what was playing —
+        # a per-session stop that didn't touch the current line leaves it be.
+        if stopped_current:
+            self.ducker.restore_now()
+            set_speaking(False)
 
-    def _stale(self, gen):
+    def _stale(self, session, gen):
         with self.lock:
-            return gen != self.generation
+            return gen != self._gen(session)
 
     def _remember(self, audio, sr):
         """Cache a finished line: write the newest-line wav and push a copy into
@@ -332,62 +377,64 @@ class Player:
                     pass
             self.cursor = len(self.history) - 1
 
-    def _play(self, gen, wav_path, audio, settings):
+    def _play(self, item, wav_path, audio):
         """Play one wav via afplay, registered as `current` so stop/pause can
         reach it. Returns False if superseded before it could start."""
-        gain = min(kc.gain_from_volume(settings["volume"]), kc.clip_ceiling(audio))
+        gain = min(kc.gain_from_volume(item.settings["volume"]), kc.clip_ceiling(audio))
         with self.lock:
-            if gen != self.generation:
+            if item.gen != self._gen(item.session):
                 return False
             set_speaking(True)
+            self.current_session = item.session
             self.current = subprocess.Popen(["afplay", "-v", f"{gain:.3f}", wav_path])
         self.current.wait()
         return True
 
     def _run(self):
         while True:
-            gen, kind, voice, speed, text, remember, settings, done = self.q.get()
+            item = self.q.get()
             try:
-                if self._stale(gen):
+                if self._stale(item.session, item.gen):
                     continue
                 try:
-                    if kind == "replay":
-                        self._play_replay(gen, text, settings)
+                    if item.kind == "replay":
+                        self._play_replay(item)
                     else:
-                        self._play_streaming(gen, voice, speed, text, remember, settings)
+                        self._play_streaming(item)
                 except Exception:
                     pass
                 finally:
-                    self.ducker.end(settings)
+                    self.ducker.end(item.settings)
                     if self.q.empty():
                         set_speaking(False)
             finally:
                 # Always release a wait-until-spoken caller, however this line
                 # ended — played, dropped as stale, or errored.
-                if done is not None:
-                    done.set()
+                if item.done is not None:
+                    item.done.set()
 
-    def _play_replay(self, gen, path, settings):
-        out = path or LAST_WAV
+    def _play_replay(self, item):
+        out = item.text or LAST_WAV
         if not out or not os.path.exists(out):
             return
-        self.ducker.begin(settings)
-        self._play(gen, out, None, settings)  # audio=None -> conservative gain cap
+        self.ducker.begin(item.settings)
+        self._play(item, out, None)  # audio=None -> conservative gain cap
 
-    def _play_streaming(self, gen, voice, speed, text, remember, settings):
+    def _play_streaming(self, item):
         """Synthesize sentence-by-sentence and play each as soon as it's ready,
         synthesizing the NEXT sentence while the current one plays. First audio
         lands after just the first sentence; there's no full-line wait."""
         import numpy as np
         import soundfile as sf
 
-        pieces = kc.stream_pieces(text)
-        if self._stale(gen) or not pieces:
+        session, gen, settings = item.session, item.gen, item.settings
+        pieces = kc.stream_pieces(item.text)
+        if self._stale(session, gen) or not pieces:
             return
 
         def synth(piece):
             samples, sr = self.kokoro.create(
-                piece, voice=voice, speed=speed, lang="en-us"
+                piece, voice=item.voice, speed=item.speed, lang="en-us"
             )
             seg = np.concatenate(
                 [samples, np.zeros(int(sr * 0.1), dtype=samples.dtype)]
@@ -409,31 +456,32 @@ class Player:
                 self.ducker.begin(settings)
                 began = True
             with self.lock:
-                if gen != self.generation:
+                if gen != self._gen(session):
                     self._unlink(path)
                     break
                 collected.append(seg)
                 set_speaking(True)
+                self.current_session = session
                 self.current = subprocess.Popen(["afplay", "-v", f"{gain:.3f}", path])
                 proc = self.current
             # Synthesize the NEXT sentence while THIS one is playing, so there's
             # no gap between sentences and only the first sentence costs latency.
             nxt = None
-            if i + 1 < len(pieces) and not self._stale(gen):
+            if i + 1 < len(pieces) and not self._stale(session, gen):
                 try:
                     nxt = synth(pieces[i + 1])
                 except Exception:
                     nxt = None
             proc.wait()
             self._unlink(path)
-            if self._stale(gen):
+            if self._stale(session, gen):
                 if nxt is not None:
                     self._unlink(nxt[0])
                     nxt = None
                 break
 
         # Cache the full line for repeat / history, but only if it played in full.
-        if remember and len(collected) == len(pieces) and not self._stale(gen):
+        if item.remember and len(collected) == len(pieces) and not self._stale(session, gen):
             self._remember(np.concatenate(collected), sr)
 
     @staticmethod
@@ -530,7 +578,9 @@ def main():
                 req = {}
 
             if req.get("stop"):
-                player.stop()
+                # A "session" scopes the stop to that session's own lines; without
+                # one it's a global stop (panic hotkey / shutdown).
+                player.stop(req.get("session"))
                 _reply(conn, b"OK\n")
                 return
 
@@ -575,6 +625,7 @@ def main():
             # still accepted and unblocks us.
             done = threading.Event() if req.get("wait_done") else None
             player.submit(
+                req.get("session"),
                 voice,
                 speed,
                 text,

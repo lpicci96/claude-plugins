@@ -114,19 +114,31 @@ _within_ a turn — e.g. queued interim narration.)
 - **Warm start:** running `/talk` spins the voice engine up right away, so your first spoken line isn't the slow one.
 - **Knows when it's done:** the spoken wrap-up blocks until the audio has actually finished, so Claude's turn ends when the voice does — not with the voice still trailing after the prompt looks finished.
 - **Stays in voice:** while `/talk` is on, a per-turn nudge keeps Claude speaking and narrating its work, instead of quietly drifting back to text mid-session.
-- **Barge-in:** a `UserPromptSubmit` hook stops playback the moment you send your next message.
+- **Barge-in:** a `UserPromptSubmit` hook stops playback the moment you send your next message — scoped to that session, so it never cuts off another session that's speaking.
+- **Multiple sessions:** two `/talk` sessions share one voice, one line at a time (never talking over each other); each can get its own voice so you can tell them apart. See [Multiple sessions](#multiple-sessions) below.
 - **Never breaks:** if the daemon or model is unavailable, it falls back to one-shot synthesis, then to macOS `say`.
+
+## Multiple sessions
+
+Running `/talk` in two Claude Code windows at once works, coordinated through the one shared daemon:
+
+- **One voice at a time.** Lines from both sessions play through a single queue, so they never talk over each other — if session 1 is mid-sentence, session 2's line waits its turn. (Stop session 1 to let session 2 through sooner.)
+- **Isolated stop.** Sending a prompt in one session stops only *that* session's audio; the other keeps playing. The global `alt-esc` hotkey still stops everything.
+- **Tell them apart.** By default each session gets its own voice (`CLAUDE_TALK_SESSION_VOICE=distinct`). Override per session when you start it: `/talk different` forces a distinct voice, `/talk same` uses your configured one. Set `CLAUDE_TALK_SESSION_VOICE=same` to make every session sound the same by default.
+
+Repeat / step-back hotkeys are global (they aren't tied to a session), so they walk the most recent lines spoken by *any* session — which, with distinct voices, is easy to follow.
 
 ## Configuration
 
 Settings live in `~/.claude/claude-talk/config.env`:
 
 ```sh
-KOKORO_VOICE=af_heart    # e.g. af_bella, am_michael, bf_emma, bm_george
-KOKORO_SPEED=1.0         # 0.8–1.3
-CLAUDE_TALK_NAME=""      # optional; what Claude calls you
-CLAUDE_TALK_VOLUME=100   # Claude's voice loudness; 100 = normal, up to ~190 louder
-CLAUDE_TALK_DUCK=on      # dim playing media apps (Spotify, Music) while speaking
+KOKORO_VOICE=af_heart          # e.g. af_bella, am_michael, bf_emma, bm_george
+KOKORO_SPEED=1.0               # 0.8–1.3
+CLAUDE_TALK_NAME=""            # optional; what Claude calls you
+CLAUDE_TALK_VOLUME=100         # Claude's voice loudness; 100 = normal, up to ~190 louder
+CLAUDE_TALK_DUCK=on            # dim playing media apps (Spotify, Music) while speaking
+CLAUDE_TALK_SESSION_VOICE=distinct  # with 2+ talk sessions: distinct = each its own voice; same = all alike
 ```
 
 Change these with `/talk-setup`, or re-run the picker: `install.sh --configure`.

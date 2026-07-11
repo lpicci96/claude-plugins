@@ -54,6 +54,7 @@ KNOWN_KEYS = (
     "CLAUDE_TALK_NAME",
     "CLAUDE_TALK_VOLUME",
     "CLAUDE_TALK_DUCK",
+    "CLAUDE_TALK_SESSION_VOICE",
 )
 
 
@@ -151,6 +152,15 @@ def main():
     if duck_in:
         duck = "off" if duck_in in ("n", "no", "off", "0", "false") else "on"
 
+    svoice = "same" if cfg.get("CLAUDE_TALK_SESSION_VOICE", "distinct").strip().lower() == "same" else "distinct"
+    yn = "[Y/n]" if svoice == "distinct" else "[y/N]"
+    sv_in = input(
+        f"\nWhen you run more than one talk session at once, give each its own"
+        f" voice so you can tell them apart? {yn} (Enter to keep) > "
+    ).strip().lower()
+    if sv_in:
+        svoice = "same" if sv_in in ("n", "no", "off", "0", "false", "same") else "distinct"
+
     name = cfg.get("CLAUDE_TALK_NAME", "")
     name_in = input(
         f"\nWhat should I call you? [{name or 'no name'}] (Enter to keep) > "
@@ -165,6 +175,7 @@ def main():
         f.write(f'CLAUDE_TALK_NAME="{name}"\n')
         f.write(f"CLAUDE_TALK_VOLUME={volume}\n")
         f.write(f"CLAUDE_TALK_DUCK={duck}\n")
+        f.write(f"CLAUDE_TALK_SESSION_VOICE={svoice}\n")
         for line in extras:
             f.write(f"{line}\n")
 
@@ -173,6 +184,7 @@ def main():
     print(f"  speed  = {speed}")
     print(f"  volume = {volume}")
     print(f"  duck   = {duck}")
+    print(f"  multi-session voice = {svoice}")
     if name:
         print(f"  name   = {name}")
     return 0
